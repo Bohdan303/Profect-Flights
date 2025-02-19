@@ -155,7 +155,7 @@ min_distance = df_airports['geodesic_distance'].min()
 max_distance = df_airports['geodesic_distance'].max()
 
 # Filter and prepare data for US airports
-df_us_airports = df_airports[df_airports['tzone'].str.contains("America", na=False)]  # Avoid NaN issues
+df_us_airports = df_airports[df_airports['tzone'].str.contains("America", na=False)]
 
 # Function to plot multiple routes from JFK
 # This function plots multiple routes from JFK to several airports with color-coding based on distance
@@ -187,7 +187,9 @@ def plot_routes(airport_codes):
                 mode='lines+markers',
                 line=dict(width=2, color=color),
                 marker=dict(size=8, symbol="circle"),
-                text=[f"JFK → {code}"]
+                text=f"{code} ({distance:.2f} km)", 
+                textsrc="JFK", 
+                name=f"JFK → {code}({distance:.2f} km)"
             ))
         else:
             print(f"Invalid airport code: {code}")
@@ -195,11 +197,10 @@ def plot_routes(airport_codes):
     fig.update_layout(title="Flight Routes from JFK", geo=dict(showland=True, landcolor="lightgray"))
     fig.show()
 
-code = df_airports.sample(1)['FAA']
-plot_routes(code)
+user_input = input("Enter FAA codes seperated by commas with no spaces (FAA,FAA,FAA):")
+input_FAA_codes = [code.strip().upper() for code in user_input.split(",") if code.strip()]
 
-code_array = df_airports.sample(30)['FAA']
-plot_routes(code_array)
+plot_routes(input_FAA_codes)
 
 # --- Bar Charts ---
 # 1. Distribution of airports by time zone
