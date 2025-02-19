@@ -38,13 +38,15 @@ def plot_routes(df, airport_codes):
         norm_value = (distance - min_distance) / (max_distance - min_distance)
         color = sample_colorscale('Viridis', [norm_value])[0]
         
-        fig.add_trace(go.Scattergeo(
-            lat=[jfk_lat, target_lat],
-            lon=[jfk_lon, target_lon],
+       fig.add_trace(go.Scattergeo(
+            lat=[nyc['lat'].values[0], target_airport['lat'].values[0]],
+            lon=[nyc['lon'].values[0], target_airport['lon'].values[0]],
             mode='lines+markers',
             line=dict(width=2, color=color),
             marker=dict(size=8, symbol="circle"),
-            text=[f"JFK → {code}"]
+            text=f"{code} ({distance:.2f} km)", 
+            textsrc="JFK", 
+            name=f"JFK → {code}({distance:.2f} km)"
         ))
     
     fig.update_layout(
