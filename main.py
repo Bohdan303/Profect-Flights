@@ -28,9 +28,11 @@ def main():
     
     # Route Plotting
     print("Plotting flight routes from JFK...")
-    # Choose a random sample of airport codes for route plotting
-    sample_codes = df['FAA'].sample(5).tolist()
-    route_plotting.plot_routes(df, sample_codes)
+    # Ask for an input of FAA codes for route plotting
+    user_input = input("Enter FAA codes seperated by commas with no spaces (FAA,FAA,FAA):")
+    input_FAA_codes = [code.strip().upper() for code in user_input.split(",") if code.strip()]
+    route_plotting.plot_routes(df, input_FAA_codes)
+    
     
     # Bar Charts / Histograms
     print("Generating bar charts and histograms...")
