@@ -7,6 +7,55 @@ import plotly.graph_objects as go
 
 DB_PATH = 'flights_db_extracted/flights_database.db'
 
+#Point 1
+def verify_distances():
+    """
+    Verify computed distances with flight distances from the flights table.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        query = "SELECT origin, dest, distance FROM flights LIMIT 10"
+        df = pd.read_sql(query, conn)
+        print('Sample flight distances from database:')
+        print(df)
+
+#Point 2
+def get_nyc_airports():
+    """
+    Identify different NYC departure airports using the flights table.
+    Returns a DataFrame with airport details.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        query = """
+        SELECT * FROM airports
+        WHERE faa IN (SELECT DISTINCT origin FROM flights)
+        """
+        df = pd.read_sql(query, conn)
+        return df
+
+#Point 3
+def plot_flight_destinations(month, day, airport):
+    """
+    Plot all flight destinations from a specific NYC airport on a given day.
+    Assumes the flights table has a 'date' column in 'YYYY-MM-DD' format.
+    """
+    with sqlite3.connect(DB_PATH) as conn:
+        month_str = f'{month:02d}'
+        day_str = f'{day:02d}'
+        query = f"""
+        SELECT f.dest, a.latitude, a.longitude, a.name 
+        FROM flights f
+        JOIN airports a ON f.dest = a.faa
+        WHERE f.origin = '{airport}'
+        AND strftime('%m', f.date) = '{month_str}'
+        AND strftime('%d', f.date) = '{day_str}'
+        """
+        df = pd.read_sql(query, conn)
+        if df.empty:
+            print(f'No flights found for {airport} on {month_str}-{day_str}')
+        else:
+            title = f'Flight Destinations from {airport} on {month_str}-{day_str}'
+            plot_airports_world(df, title=title)
+
 #Point 4
 def flight_statistics_for_day(month, day, airport):
     with sqlite3.connect(DB_PATH) as conn:
