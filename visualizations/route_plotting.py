@@ -1,6 +1,6 @@
 import plotly.graph_objects as go
 from plotly.colors import sample_colorscale
-from calculations import haversine_distance
+from calculations.calculations import haversine_distance
 
 def plot_routes(df, airport_codes):
     """
