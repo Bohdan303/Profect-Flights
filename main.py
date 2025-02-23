@@ -1,6 +1,7 @@
 import random
 from data_loader import load_data
-from calculations import calculate_all
+from calculations.calculations import calculate_all
+from calculations.db_queries import run_all_db_functions
 from visualizations import route_plotting, scatterplot, barchart, piecharts
 
 def main():
@@ -44,6 +45,10 @@ def main():
     # Pie Charts
     print("Generating pie charts...")
     piecharts.plot_timezone_pie_chart(df)
+    
+    #db_queries 
+    print("Running database queries...")
+    run_all_db_functions()
     
 if __name__ == "__main__":
     main()
