@@ -3,7 +3,7 @@ import pandas as pd
 import math
 import plotly.express as px
 import plotly.graph_objects as go
-
+from calculations import haversine_distance
 
 DB_PATH = 'flights_db_extracted/flights_database.db'
 
