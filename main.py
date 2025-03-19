@@ -1,669 +1,1304 @@
-import os  
-import sqlite3  
-import pickle  
-import datetime  
-import time  
-from math import radians, sin, cos, sqrt, atan2  
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor  
+# ============================================================================ 
+# Imports and Global Constants 
+# ============================================================================ 
+import os
+import sqlite3
+import pickle
+import datetime
+import time
+from math import radians, sin, cos, atan2, degrees, sqrt
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 import concurrent
 
-import pandas as pd  
-import numpy as np  
-import pytz  
-from timezonefinder import TimezoneFinder  
-import reverse_geocoder as rg  
-import pycountry  
-import pycountry_convert as pc  
+import threading
+from streamlit.runtime.scriptrunner import add_script_run_ctx
+
+import pandas as pd
+import numpy as np
+import pytz
+from timezonefinder import TimezoneFinder
+import reverse_geocoder as rg
+import pycountry
+import pycountry_convert as pc
 import requests
 
-import plotly.express as px  
+import plotly.express as px
 import plotly.graph_objects as go
+import streamlit as st
 
-# ============================================================================  
-# Part 1: Data Loading and Preprocessing  
-# ============================================================================  
 
-# Global Objects and Constants  
-tf = TimezoneFinder()  
-BASE_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"  
-HOURLY_PARAMS = ("temperature_2m,dewpoint_2m,relativehumidity_2m,"  
-                 "winddirection_10m,windspeed_10m,windgusts_10m,"  
+tf = TimezoneFinder()
+BASE_URL = "https://historical-forecast-api.open-meteo.com/v1/forecast"
+HOURLY_PARAMS = ("temperature_2m,dewpoint_2m,relativehumidity_2m,"
+                 "winddirection_10m,windspeed_10m,windgusts_10m,"
                  "precipitation,surface_pressure,visibility")
 
-# --- Time Utilities ---  
-def convert_time_hour_to_utc(ts):  
-    """Converts a Unix timestamp (in seconds) to a UTC-aware datetime."""  
+# ============================================================================ 
+# Time & Conversion Utilities 
+# ============================================================================ 
+def convert_time_hour_to_utc(ts):
+    """Converts a Unix timestamp (in seconds) to a UTC-aware datetime."""
     return datetime.datetime.fromtimestamp(ts, datetime.timezone.utc)
 
-def clock_to_minutes(val):  
-    """Converts a HHMM clock value to minutes since midnight."""  
-    try:  
-        val_int = int(val)  
-    except Exception:  
-        return None  
-    s = f"{val_int:04d}"  
-    hours = int(s[:2])  
-    minutes = int(s[2:])  
+def clock_to_minutes(val):
+    """Converts a HHMM clock value to minutes since midnight."""
+    try:
+        val_int = int(val)
+    except Exception:
+        return None
+    s = f"{val_int:04d}"
+    hours = int(s[:2])
+    minutes = int(s[2:])
     return hours * 60 + minutes
 
-def minutes_to_clock(minutes):  
-    """Converts minutes since midnight back to HHMM clock format (integer)."""  
-    minutes = int(round(minutes))  
-    hours = minutes // 60  
-    mins = minutes % 60  
+def minutes_to_clock(minutes):
+    """Converts minutes since midnight back to HHMM clock format (integer)."""
+    minutes = int(round(minutes))
+    hours = minutes // 60
+    mins = minutes % 60
     return int(f"{hours:02d}{mins:02d}")
 
-# --- Database Loading ---  
-def load_data(db_path="flights_database.db"):  
-    """Connects to the database, sets PRAGMAs, creates indexes, and loads all tables."""  
-    conn = sqlite3.connect(db_path)  
-    conn.execute("PRAGMA journal_mode = MEMORY")  
-    conn.execute("PRAGMA synchronous = OFF")  
-    conn.execute("PRAGMA temp_store = MEMORY")  
+def ensure_datetime(val):
+    """
+    Ensures that the input value is a UTC-aware datetime object.
+    - If already a datetime, returns it.
+    - If a number, assumes it's a Unix timestamp (in seconds) and converts it.
+    - If a string, first replaces a space with 'T' (if needed) before attempting ISO parsing.
+    """
+    if isinstance(val, datetime.datetime):
+        return val
+    if isinstance(val, (float, int)):
+        return convert_time_hour_to_utc(val)
+    if isinstance(val, str):
+        try:
+            # Replace space with 'T' for strict ISO format if needed.
+            val_iso = val.replace(" ", "T")
+            return datetime.datetime.fromisoformat(val_iso)
+        except Exception:
+            try:
+                return convert_time_hour_to_utc(float(val))
+            except Exception:
+                return None
+    return None
+
+# ============================================================================ 
+# Integrated Time Processing Functions 
+# ============================================================================ 
+def clock_to_datetime(val, base_date):
+    """Converts a HHMM clock value to a datetime object using the provided base_date."""
+    try:
+        val_int = int(val)
+    except Exception:
+        return None
+    s = f"{val_int:04d}"
+    hour = int(s[:2])
+    minute = int(s[2:])
+    if hour > 23 or minute > 59:
+        hour = 00
+        return datetime.datetime.combine(base_date, datetime.time(hour=hour, minute=minute)) + datetime.timedelta(days=1)
+    else:
+        return datetime.datetime.combine(base_date, datetime.time(hour=hour, minute=minute))
+
+def process_time_fields(row, tol_percent=10):
+    """
+    Optimized processing of time-related fields for a single flight row.
+    (See original docstring for detailed logic.)
+    """
+    status = {}
+    
+    # Convert base time only once.
+    time_hour = row.get('time_hour')
+    base_dt = ensure_datetime(time_hour)
+    if base_dt is None:
+        status['base_date'] = "Missing"
+        row['time_status'] = status
+        return row
+    base_date = base_dt.date()
+
+    # Convert scheduled times once.
+    sched_dep = row.get('sched_dep_time')
+    sched_arr = row.get('sched_arr_time')
+    sched_dep_dt = clock_to_datetime(sched_dep, base_date)
+    sched_arr_dt = clock_to_datetime(sched_arr, base_date)
+    if sched_dep_dt is None or sched_arr_dt is None:
+        status['sched_times'] = "Missing scheduled times"
+    else:
+        status['sched_times'] = "OK"
+    # Adjust for overnight flights (assigning the adjusted value)
+    if sched_dep_dt and sched_arr_dt and sched_arr_dt < sched_dep_dt:
+        sched_arr_dt = sched_arr_dt + datetime.timedelta(days=1)
+    computed_sched_air_time = (sched_arr_dt - sched_dep_dt).total_seconds() / 60.0 if sched_dep_dt and sched_arr_dt else None
+    status['computed_sched_air_time'] = computed_sched_air_time
+
+    # --- Process Departure ---
+    dep_delay_val = row.get('dep_delay')
+    dep_time_val = row.get('dep_time')
+    if pd.isnull(dep_delay_val):
+        status['dep_delay'] = "Missing"
+        if pd.notnull(dep_time_val):
+            # Convert once if needed.
+            dep_dt = dep_time_val if isinstance(dep_time_val, datetime.datetime) else clock_to_datetime(dep_time_val, base_date)
+            computed_dep_delay = (dep_dt - sched_dep_dt).total_seconds() / 60.0 if sched_dep_dt and dep_dt else 0.0
+            status['computed_dep_delay'] = computed_dep_delay
+            dep_delay = computed_dep_delay
+            status['dep_delay_status'] = "Calculated from dep_time"
+        else:
+            dep_delay = 0.0
+            dep_dt = sched_dep_dt
+            status['dep_delay_status'] = "Missing; assumed 0 delay"
+    else:
+        dep_delay = dep_delay_val
+        if pd.isnull(dep_time_val):
+            dep_dt = sched_dep_dt + datetime.timedelta(minutes=dep_delay)
+            status['dep_time'] = "Missing; computed from sched_dep_dt + dep_delay"
+        else:
+            dep_dt = dep_time_val if isinstance(dep_time_val, datetime.datetime) else clock_to_datetime(dep_time_val, base_date)
+            computed_dep_delay = (dep_dt - sched_dep_dt).total_seconds() / 60.0 if sched_dep_dt and dep_dt else 0.0
+            status['computed_dep_delay'] = computed_dep_delay
+            if abs(computed_dep_delay) > 0:
+                percent_diff = abs(computed_dep_delay - dep_delay) / abs(computed_dep_delay) * 100
+            else:
+                percent_diff = 0
+            if percent_diff > tol_percent:
+                status['dep_delay_status'] = f"Inconsistent (diff {percent_diff:.1f}%); using computed value"
+                dep_delay = computed_dep_delay
+            else:
+                status['dep_delay_status'] = "Consistent"
+
+    # --- Process Arrival ---
+    arr_delay_val = row.get('arr_delay')
+    arr_time_val = row.get('arr_time')
+    if pd.isnull(arr_delay_val):
+        status['arr_delay'] = "Missing"
+        if pd.notnull(arr_time_val):
+            arr_dt = arr_time_val if isinstance(arr_time_val, datetime.datetime) else clock_to_datetime(arr_time_val, base_date)
+            computed_arr_delay = (arr_dt - sched_arr_dt).total_seconds() / 60.0 if sched_arr_dt and arr_dt else 0.0
+            status['computed_arr_delay'] = computed_arr_delay
+            arr_delay = computed_arr_delay
+            status['arr_delay_status'] = "Calculated from arr_time"
+        else:
+            arr_delay = 0.0
+            arr_dt = sched_arr_dt
+            status['arr_delay_status'] = "Missing; assumed 0 delay"
+    else:
+        arr_delay = arr_delay_val
+        if pd.isnull(arr_time_val):
+            arr_dt = sched_arr_dt + datetime.timedelta(minutes=arr_delay)
+            status['arr_time'] = "Missing; computed from sched_arr_dt + arr_delay"
+        else:
+            arr_dt = arr_time_val if isinstance(arr_time_val, datetime.datetime) else clock_to_datetime(arr_time_val, base_date)
+            computed_arr_delay = (arr_dt - sched_arr_dt).total_seconds() / 60.0 if sched_arr_dt and arr_dt else 0.0
+            status['computed_arr_delay'] = computed_arr_delay
+            if abs(computed_arr_delay) > 0:
+                percent_diff = abs(computed_arr_delay - arr_delay) / abs(computed_arr_delay) * 100
+            else:
+                percent_diff = 0
+            if percent_diff > tol_percent:
+                status['arr_delay_status'] = f"Inconsistent (diff {percent_diff:.1f}%); using computed value"
+                arr_delay = computed_arr_delay
+            else:
+                status['arr_delay_status'] = "Consistent"
+
+    # Adjust actual arrival time for overnight flights.
+    if dep_dt and arr_dt and arr_dt < dep_dt:
+        arr_dt += datetime.timedelta(days=1)
+        status['overnight'] = "Adjusted"
+    else:
+        status['overnight'] = "None"
+
+    computed_air_time = (arr_dt - dep_dt).total_seconds() / 60.0 if dep_dt and arr_dt else None
+    status['computed_air_time'] = computed_air_time
+    air_time_val = row.get('air_time')
+    if pd.isnull(air_time_val):
+        air_time = computed_air_time
+        status['air_time_status'] = "Missing; set to computed_air_time"
+    else:
+        air_time = air_time_val
+        if computed_air_time and abs(computed_air_time) > 0:
+            percent_diff = abs(air_time - computed_air_time) / abs(computed_air_time) * 100
+        else:
+            percent_diff = 0
+        if percent_diff > tol_percent:
+            status['air_time_status'] = f"Inconsistent (diff {percent_diff:.1f}%); using computed_air_time"
+            air_time = computed_air_time
+        else:
+            status['air_time_status'] = "Consistent"
+
+    status['duration_diff'] = computed_air_time - air_time if computed_air_time is not None and air_time is not None else None
+
+    # Save all computed values into the row.
+    row['sched_dep_dt'] = sched_dep_dt
+    row['sched_arr_dt'] = sched_arr_dt
+    row['dep_dt'] = dep_dt
+    row['arr_dt'] = arr_dt
+    row['dep_delay'] = dep_delay
+    row['arr_delay'] = arr_delay
+    row['air_time'] = air_time
+    row['computed_sched_air_time'] = computed_sched_air_time
+    row['computed_air_time'] = computed_air_time
+    row['duration_diff'] = status['duration_diff']
+    row['time_status'] = status
+
+    return row
+
+def process_all_time_fields(df, tol_percent=10):
+    """Applies process_time_fields row-wise to the entire DataFrame."""
+    return df.apply(lambda r: process_time_fields(r, tol_percent=tol_percent), axis=1)
+
+def worker(chunk, tol_percent):
+    # Attach the current Streamlit ScriptRunContext to this worker thread.
+    add_script_run_ctx(threading.current_thread())
+    # Process the chunk row-wise.
+    lol = chunk.apply(lambda r: process_time_fields(r, tol_percent=tol_percent), axis=1)
+    print(f"Processed chunk with {len(chunk)} rows.")
+    return lol
+
+def process_all_time_fields_multithreaded(df, tol_percent=10, n_threads=5):
+    """
+    Applies process_time_fields row-wise to the entire DataFrame using multithreading.
+    Splits the DataFrame into n_threads chunks, applies process_time_fields on each chunk concurrently,
+    and then concatenates the results.
+    """
+    # Split the DataFrame into approximately equal chunks.
+    chunks = np.array_split(df, n_threads)
+    results = []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
+        # Submit a job for each chunk using our worker function.
+        futures = [executor.submit(worker, chunk, tol_percent) for chunk in chunks]
+        # Wait for all threads to finish and collect the results.
+        for future in futures:
+            results.append(future.result())
+    # Concatenate the processed chunks back into a single DataFrame.
+    return pd.concat(results)
+
+##vectorized part
+
+# --------------------------
+# 1. Time Conversion Helpers
+# --------------------------
+def vectorized_ensure_datetime(series):
+    """
+    Ensures that a Series of time values is converted to UTC-aware datetimes.
+    Assumes the values are in an ISO-like format.
+    """
+    return pd.to_datetime(series, errors='coerce', utc=True)
+
+def vectorized_clock_to_datetime(series, base_dates):
+    """
+    Vectorized conversion of HHMM clock values (as strings or numbers) into datetimes.
+    - series: Series of HHMM values.
+    - base_dates: Series of base dates (as datetime64[ns]) to combine with.
+    
+    For invalid values (hour > 23 or minute > 59), sets hour to 0 and adds one day.
+    """
+    # Convert values to string and remove trailing '.0' if present, then ensure 4 digits.
+    s = series.astype(str).str.replace(r'\.0$', '', regex=True).str.zfill(4)
+    hours = s.str[:2].astype(int)
+    minutes = s.str[2:].astype(int)
+    base_dt = pd.to_datetime(base_dates)
+    dt = base_dt + pd.to_timedelta(hours, unit='h') + pd.to_timedelta(minutes, unit='m')
+    
+    # Identify rows with invalid time values.
+    invalid = (hours > 23) | (minutes > 59)
+    if invalid.any():
+        dt_invalid = pd.to_datetime(base_dates[invalid]) + pd.DateOffset(days=1) + pd.to_timedelta(minutes[invalid], unit='m')
+        dt.loc[invalid] = dt_invalid
+    return dt
+
+# --------------------------
+# 2. Scheduled Time Computation
+# --------------------------
+def compute_sched_datetimes(df):
+    """
+    Computes scheduled departure and arrival datetimes (and base_date) from the
+    HHMM fields using vectorized operations. Also adjusts for overnight scheduled arrivals.
+    """
+    # Convert base times
+    df['base_dt'] = vectorized_ensure_datetime(df['time_hour'])
+    df['base_date'] = df['base_dt'].dt.floor('D')
+    
+    # Compute scheduled departure and arrival datetimes
+    df['sched_dep_dt'] = vectorized_clock_to_datetime(df['sched_dep_time'], df['base_date'])
+    df['sched_arr_dt'] = vectorized_clock_to_datetime(df['sched_arr_time'], df['base_date'])
+    
+    # Adjust for overnight scheduled arrival times.
+    overnight_mask = df['sched_arr_dt'] < df['sched_dep_dt']
+    df.loc[overnight_mask, 'sched_arr_dt'] = df.loc[overnight_mask, 'sched_arr_dt'] + pd.Timedelta(days=1)
+    
+    # Compute scheduled air time (in minutes)
+    df['computed_sched_air_time'] = (df['sched_arr_dt'] - df['sched_dep_dt']).dt.total_seconds() / 60.0
+    return df
+
+# --------------------------
+# 3. Departure Processing
+# --------------------------
+def process_departure_times(df, tol_percent=10):
+    """
+    Processes departure times:
+      - If 'dep_time' is available, converts it via the clock conversion.
+      - Otherwise, computes departure datetime as scheduled departure plus reported dep_delay.
+      - Computes the computed departure delay and “corrects” the reported delay if needed.
+    """
+    # Where dep_time is available, compute it.
+    dep_time_mask = df['dep_time'].notnull()
+    df.loc[dep_time_mask, 'dep_dt'] = vectorized_clock_to_datetime(df.loc[dep_time_mask, 'dep_time'],
+                                                                   df.loc[dep_time_mask, 'base_date'])
+    # Where dep_time is missing, use sched_dep_dt + dep_delay (defaulting missing dep_delay to 0).
+    missing_dep_time = ~dep_time_mask
+    df.loc[missing_dep_time, 'dep_dt'] = df.loc[missing_dep_time, 'sched_dep_dt'] + \
+        pd.to_timedelta(df.loc[missing_dep_time, 'dep_delay'].fillna(0), unit='m')
+    
+    # Compute the computed departure delay (in minutes)
+    df['computed_dep_delay'] = (df['dep_dt'] - df['sched_dep_dt']).dt.total_seconds() / 60.0
+    
+    # Final departure delay: if reported delay is missing, use computed;
+    # if reported exists, use computed value when relative difference exceeds tol_percent.
+    df['dep_delay_final'] = np.where(df['dep_delay'].isnull(),
+                                     df['computed_dep_delay'],
+                                     df['dep_delay'])
+    diff = abs(df['computed_dep_delay'] - df['dep_delay_final'])
+    relative_diff = np.where(abs(df['computed_dep_delay']) > 0,
+                             diff / abs(df['computed_dep_delay']) * 100,
+                             0)
+    adjust_mask = relative_diff > tol_percent
+    df.loc[adjust_mask, 'dep_delay_final'] = df.loc[adjust_mask, 'computed_dep_delay']
+    return df
+
+# --------------------------
+# 4. Arrival Processing
+# --------------------------
+def process_arrival_times(df, tol_percent=10):
+    """
+    Processes arrival times using similar logic as departure times.
+    """
+    # Where arr_time is available, convert it.
+    arr_time_mask = df['arr_time'].notnull()
+    df.loc[arr_time_mask, 'arr_dt'] = vectorized_clock_to_datetime(df.loc[arr_time_mask, 'arr_time'],
+                                                                   df.loc[arr_time_mask, 'base_date'])
+    # Where arr_time is missing, use sched_arr_dt + arr_delay.
+    missing_arr_time = ~arr_time_mask
+    df.loc[missing_arr_time, 'arr_dt'] = df.loc[missing_arr_time, 'sched_arr_dt'] + \
+        pd.to_timedelta(df.loc[missing_arr_time, 'arr_delay'].fillna(0), unit='m')
+    
+    # Compute computed arrival delay (in minutes)
+    df['computed_arr_delay'] = (df['arr_dt'] - df['sched_arr_dt']).dt.total_seconds() / 60.0
+    
+    # Final arrival delay: if reported is missing, use computed; otherwise adjust if difference is too high.
+    df['arr_delay_final'] = np.where(df['arr_delay'].isnull(),
+                                     df['computed_arr_delay'],
+                                     df['arr_delay'])
+    diff = abs(df['computed_arr_delay'] - df['arr_delay_final'])
+    relative_diff = np.where(abs(df['computed_arr_delay']) > 0,
+                             diff / abs(df['computed_arr_delay']) * 100,
+                             0)
+    adjust_mask = relative_diff > tol_percent
+    df.loc[adjust_mask, 'arr_delay_final'] = df.loc[adjust_mask, 'computed_arr_delay']
+    return df
+
+# --------------------------
+# 5. Overnight Adjustment & Air Time Calculation
+# --------------------------
+def adjust_actual_overnight(df):
+    """
+    For rows where the computed arrival datetime is before the departure,
+    adds one day to the arrival datetime.
+    """
+    mask = df['arr_dt'] < df['dep_dt']
+    df.loc[mask, 'arr_dt'] = df.loc[mask, 'arr_dt'] + pd.Timedelta(days=1)
+    return df
+
+def compute_air_time(df, tol_percent=10):
+    """
+    Computes the actual air time (in minutes) from dep_dt and arr_dt and adjusts
+    the reported air_time if the relative difference exceeds tol_percent.
+    """
+    df['computed_air_time'] = (df['arr_dt'] - df['dep_dt']).dt.total_seconds() / 60.0
+    df['air_time_final'] = np.where(df['air_time'].isnull(),
+                                    df['computed_air_time'],
+                                    df['air_time'])
+    diff = abs(df['computed_air_time'] - df['air_time_final'])
+    relative_diff = np.where(abs(df['computed_air_time']) > 0,
+                             diff / abs(df['computed_air_time']) * 100,
+                             0)
+    adjust_mask = relative_diff > tol_percent
+    df.loc[adjust_mask, 'air_time_final'] = df.loc[adjust_mask, 'computed_air_time']
+    return df
+
+# --------------------------
+# 6. Master Processing Function (Vectorized)
+# --------------------------
+def process_all_time_fields_vectorized(df, tol_percent=10):
+    """
+    Processes all time-related fields on the entire DataFrame using vectorized operations.
+    It computes scheduled datetimes, processes departure and arrival times,
+    adjusts for overnight actual flights, and computes the final air time.
+    """
+    df = compute_sched_datetimes(df)
+    df = process_departure_times(df, tol_percent)
+    df = process_arrival_times(df, tol_percent)
+    df = adjust_actual_overnight(df)
+    df = compute_air_time(df, tol_percent)
+    
+    # Optionally, you can assemble a summary status DataFrame or dictionary here.
+    # For example, you might add columns with the computed delays and air times.
+    return df
+
+# --------------------------
+# 6. Master Processing Function (Vectorized) (Multithreaded)
+# --------------------------
+
+def process_all_time_fields_vectorized_multithreaded(df, tol_percent=10, n_threads=5):
+    """
+    Processes all time-related fields on the entire DataFrame using a multithreaded vectorized approach.
+    
+    The DataFrame is split into n_threads chunks. Each chunk is processed using the
+    vectorized function `process_all_time_fields_vectorized`, and then the results are concatenated.
+    """
+    # Split the DataFrame into approximately equal chunks.
+    chunks = np.array_split(df, n_threads)
+    
+    # Worker function that processes a chunk using the vectorized approach.
+    def worker_vectorized(chunk, tol_percent):
+        return process_all_time_fields_vectorized(chunk, tol_percent)
+    
+    results = []
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=n_threads) as executor:
+        futures = [executor.submit(worker_vectorized, chunk, tol_percent) for chunk in chunks]
+        for future in futures:
+            results.append(future.result())
+    
+    # Concatenate the processed chunks back into a single DataFrame.
+    return pd.concat(results)
+
+
+# ============================================================================ 
+# Utility Functions Used in Later Sections 
+# ============================================================================ 
+def use_us_scope(selected_airports, df_airports):
+    """
+    Given a list of selected airport FAA codes, returns True if all airports are in the United States.
+    Assumes that the 'country' column in df_airports contains the country name.
+    """
+    for code in selected_airports:
+        row = df_airports[df_airports['faa'] == code]
+        if not row.empty and row.iloc[0]['country'] != "United States":
+            return False
+    return True
+
+def analyze_weather_effects(df_flights, df_weather):
+    """
+    Analyzes how weather variables affect delays over the year.
+    Ensures that flight and weather time columns are datetimelike.
+    Returns a DataFrame with average departure delay and average temperature by month.
+    """
+    df_flights['time_hour'] = df_flights['time_hour'].apply(ensure_datetime)
+    if 'dt' not in df_weather.columns:
+        df_weather['dt'] = df_weather['time_hour'].apply(convert_time_hour_to_utc)
+    else:
+        df_weather['dt'] = df_weather['dt'].apply(ensure_datetime)
+    df_flights['month'] = df_flights['time_hour'].dt.month
+    delay_by_month = df_flights.groupby('month')['dep_delay'].mean().reset_index()
+    df_weather['month'] = df_weather['dt'].dt.month
+    temp_by_month = df_weather.groupby('month')['temp'].mean().reset_index()
+    analysis = pd.merge(delay_by_month, temp_by_month, on='month', how='left')
+    return analysis
+
+def plot_weather_analysis(analysis_df):
+    """
+    Returns a line chart showing average departure delay and temperature by month.
+    """
+    fig = px.line(analysis_df, x='month', y=['dep_delay', 'temp'],
+                  labels={'value': 'Average Value', 'month': 'Month'},
+                  title="Average Departure Delay and Temperature by Month")
+    return fig
+
+def calculate_inner_product(bearing, wind_dir, wind_speed):
+    """
+    Calculates the inner (dot) product between the flight direction vector and wind vector.
+    Returns: wind_speed * cos((bearing - wind_dir) in radians).
+    """
+    return wind_speed * np.cos(np.radians(bearing) - np.radians(wind_dir))
+
+# ============================================================================ 
+# Database Loading and Saving 
+# ============================================================================ 
+def load_data(db_path="flights_database.db"):
+    """Connects to the database, sets PRAGMAs, creates indexes, and loads all tables."""
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA journal_mode = MEMORY")
+    conn.execute("PRAGMA synchronous = OFF")
+    conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA cache_size = 100000")
     
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_dest ON flights(dest)")  
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_origin ON flights(origin)")  
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_tailnum ON flights(tailnum)")  
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_time_hour ON flights(time_hour)")  
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_planes_tailnum ON planes(tailnum)")  
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_time_hour ON weather(time_hour)")  
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_dest ON flights(dest)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_origin ON flights(origin)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_tailnum ON flights(tailnum)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_time_hour ON flights(time_hour)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_planes_tailnum ON planes(tailnum)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_weather_time_hour ON weather(time_hour)")
     conn.commit()
     
-    df_airports = pd.read_sql_query("SELECT * FROM airports", conn)  
-    df_flights  = pd.read_sql_query("SELECT * FROM flights", conn)  
-    df_planes   = pd.read_sql_query("SELECT * FROM planes", conn)  
-    df_weather  = pd.read_sql_query("SELECT * FROM weather", conn)  
+    df_airports = pd.read_sql_query("SELECT * FROM airports", conn)
+    df_flights  = pd.read_sql_query("SELECT * FROM flights", conn)
+    df_planes   = pd.read_sql_query("SELECT * FROM planes", conn)
+    df_weather  = pd.read_sql_query("SELECT * FROM weather", conn)
     df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn)
     
     return conn, df_airports, df_flights, df_planes, df_weather, df_airlines
 
-def save_preprocessed_data(df_airports, df_flights, df_planes, df_weather, df_airlines, output_db="preprocessed_flights.db"):  
-    """Saves preprocessed DataFrames into a secondary SQLite database."""  
-    new_conn = sqlite3.connect(output_db)  
-    df_airports.to_sql("airports", new_conn, if_exists="replace", index=False)  
-    df_flights.to_sql("flights", new_conn, if_exists="replace", index=False)  
-    df_planes.to_sql("planes", new_conn, if_exists="replace", index=False)  
-    df_weather.to_sql("weather", new_conn, if_exists="replace", index=False)  
-    df_airlines.to_sql("airlines", new_conn, if_exists="replace", index=False)  
-    new_conn.commit()  
-    new_conn.close()  
+def save_preprocessed_data(df_airports, df_flights, df_planes, df_weather, df_airlines, output_db="preprocessed_flights.db"):
+    """Saves preprocessed DataFrames into a secondary SQLite database."""
+    new_conn = sqlite3.connect(output_db)
+    df_airports.to_sql("airports", new_conn, if_exists="replace", index=False)
+    df_flights.to_sql("flights", new_conn, if_exists="replace", index=False)
+    df_planes.to_sql("planes", new_conn, if_exists="replace", index=False)
+    df_weather.to_sql("weather", new_conn, if_exists="replace", index=False)
+    df_airlines.to_sql("airlines", new_conn, if_exists="replace", index=False)
+    new_conn.commit()
+    new_conn.close()
     print("Preprocessed data saved to", output_db)
 
-# --- Airport Preprocessing ---  
-def augment_airports_with_missing(df_airports, df_flights):  
-    """Augments airports table with FAA codes from flights that are missing in the airports table."""  
-    flights_dest = set(df_flights['dest'].unique())  
-    airports_faa = set(df_airports['faa'].unique())  
+# ============================================================================ 
+# Airport Preprocessing 
+# ============================================================================ 
+def augment_airports_with_missing(df_airports, df_flights):
+    """Augments airports table with FAA codes from flights that are missing in the airports table."""
+    flights_dest = set(df_flights['dest'].unique())
+    airports_faa = set(df_airports['faa'].unique())
     missing_codes = flights_dest - airports_faa
-
-    if not missing_codes:  
-        print("No missing airports found.")  
+    if not missing_codes:
+        print("No missing airports found.")
         return df_airports
-
-    print("Missing airports detected:", missing_codes)  
-    try:  
-        from airportsdata import load  
-        airports_dict = load('IATA')  
-    except ImportError:  
-        print("airportsdata module not available. Install it with 'pip install airportsdata'")  
+    print("Missing airports detected:", missing_codes)
+    try:
+        from airportsdata import load
+        airports_dict = load('IATA')
+    except ImportError:
+        print("airportsdata module not available. Install it with 'pip install airportsdata'")
         return df_airports
-
-    new_rows = []  
-    for code in missing_codes:  
-        if code in airports_dict:  
-            info = airports_dict[code]  
-            new_row = {  
-                'faa': code,  
-                'name': info.get('name', ''),  
-                'lat': info.get('lat', None),  
-                'lon': info.get('lon', None),  
-                'alt': info.get('elevation', None),  
-                'tz': np.nan,  
-                'dst': np.nan,  
-                'tzone': np.nan  
-            }  
-            new_rows.append(new_row)  
-        else:  
-            print(f"No external data found for missing airport code: {code}")  
-    if new_rows:  
-        df_new = pd.DataFrame(new_rows)  
-        df_airports = pd.concat([df_airports, df_new], ignore_index=True)  
-        print("Augmented airports table with missing data for codes:", sorted(missing_codes))  
+    new_rows = []
+    for code in missing_codes:
+        if code in airports_dict:
+            info = airports_dict[code]
+            new_row = {
+                'faa': code,
+                'name': info.get('name', ''),
+                'lat': info.get('lat', None),
+                'lon': info.get('lon', None),
+                'alt': info.get('elevation', None),
+                'tz': np.nan,
+                'dst': np.nan,
+                'tzone': np.nan
+            }
+            new_rows.append(new_row)
+        else:
+            print(f"No external data found for missing airport code: {code}")
+    if new_rows:
+        df_new = pd.DataFrame(new_rows)
+        df_airports = pd.concat([df_airports, df_new], ignore_index=True)
+        print("Augmented airports table with missing data for codes:", sorted(missing_codes))
     return df_airports
 
-def compute_timezone_info_for_missing(df_airports):  
-    """Computes timezone info (tz, dst, tzone) for airports missing this data."""  
-    for col in ['tz', 'dst', 'tzone']:  
-        if col not in df_airports.columns:  
+def compute_timezone_info_for_missing(df_airports):
+    """Computes timezone info (tz, dst, tzone) for airports missing this data."""
+    for col in ['tz', 'dst', 'tzone']:
+        if col not in df_airports.columns:
             df_airports[col] = None
-
-    def compute_info_for_row(row):  
-        tz = tf.timezone_at(lng=row['lon'], lat=row['lat'])  
-        if tz:  
-            try:  
-                tz_obj = pytz.timezone(tz)  
-                now = pd.Timestamp.now(tz=pytz.utc)  
-                local_now = now.astimezone(tz_obj)  
-                tz_offset = local_now.utcoffset().total_seconds() / 3600  
-                dst_active = "A" if local_now.dst() != pd.Timedelta(0) else "N"  
-            except Exception:  
-                tz_offset, dst_active = None, None  
-        else:  
-            tz = None  
-            tz_offset, dst_active = None, None  
+    def compute_info_for_row(row):
+        tz = tf.timezone_at(lng=row['lon'], lat=row['lat'])
+        if tz:
+            try:
+                tz_obj = pytz.timezone(tz)
+                now = pd.Timestamp.now(tz=pytz.utc)
+                local_now = now.astimezone(tz_obj)
+                tz_offset = local_now.utcoffset().total_seconds() / 3600
+                dst_active = "A" if local_now.dst() != pd.Timedelta(0) else "N"
+            except Exception:
+                tz_offset, dst_active = None, None
+        else:
+            tz = None
+            tz_offset, dst_active = None, None
         return pd.Series([tz_offset, dst_active, tz], index=['tz', 'dst', 'tzone'])
-
-    missing_mask = df_airports[['tz', 'dst', 'tzone']].isna().any(axis=1)  
-    df_airports.loc[missing_mask, ['tz', 'dst', 'tzone']] = df_airports.loc[missing_mask].apply(compute_info_for_row, axis=1)  
+    missing_mask = df_airports[['tz', 'dst', 'tzone']].isna().any(axis=1)
+    df_airports.loc[missing_mask, ['tz', 'dst', 'tzone']] = df_airports.loc[missing_mask].apply(compute_info_for_row, axis=1)
     return df_airports
 
-def country_to_continent(country_code):  
-    """Converts a 2-letter country code to a continent name."""  
-    try:  
-        continent_code = pc.country_alpha2_to_continent_code(country_code)  
-        mapping = {"AF": "Africa", "AS": "Asia", "EU": "Europe",  
-                   "NA": "North America", "OC": "Oceania",  
-                   "SA": "South America", "AN": "Antarctica"}  
-        return mapping.get(continent_code, "Unknown")  
-    except Exception:  
+def country_to_continent(country_code):
+    """Converts a 2-letter country code to a continent name."""
+    try:
+        continent_code = pc.country_alpha2_to_continent_code(country_code)
+        mapping = {"AF": "Africa", "AS": "Asia", "EU": "Europe",
+                   "NA": "North America", "OC": "Oceania",
+                   "SA": "South America", "AN": "Antarctica"}
+        return mapping.get(continent_code, "Unknown")
+    except Exception:
         return "Unknown"
 
-def add_location_info_to_airports(df_airports):  
-    """Adds reverse geocoded location info (continent, country, city) to airports."""  
-    coords = list(zip(df_airports['lat'], df_airports['lon']))  
-    results = rg.search(coords, mode=2)  
-    continents, countries, cities = [], [], []  
-    for res in results:  
-        city = res.get('name', 'Unknown')  
-        country_code = res.get('cc', 'Unknown')  
-        continent = country_to_continent(country_code)  
-        try:  
-            country_obj = pycountry.countries.get(alpha_2=country_code)  
-            country_name = country_obj.name if country_obj else country_code  
-        except Exception:  
-            country_name = country_code  
-        continents.append(continent)  
-        countries.append(country_name)  
-        cities.append(city)  
-    df_airports['continent'] = continents  
-    df_airports['country'] = countries  
-    df_airports['city'] = cities  
+def add_location_info_to_airports(df_airports):
+    """Adds reverse geocoded location info (continent, country, city) to airports."""
+    coords = list(zip(df_airports['lat'], df_airports['lon']))
+    results = rg.search(coords, mode=2)
+    continents, countries, cities = [], [], []
+    for res in results:
+        city = res.get('name', 'Unknown')
+        country_code = res.get('cc', 'Unknown')
+        continent = country_to_continent(country_code)
+        try:
+            country_obj = pycountry.countries.get(alpha_2=country_code)
+            country_name = country_obj.name if country_obj else country_code
+        except Exception:
+            country_name = country_code
+        continents.append(continent)
+        countries.append(country_name)
+        cities.append(city)
+    df_airports['continent'] = continents
+    df_airports['country'] = countries
+    df_airports['city'] = cities
     return df_airports
 
-def compute_airports_distances(df_airports):  
-    """Computes distances and bearing from JFK for each airport."""  
-    jfk = df_airports[df_airports['faa'] == "JFK"].iloc[0]  
-    jfk_lat = radians(jfk['lat'])  
-    lat_radians = np.radians(df_airports['lat'].values)  
-    lon_radians = np.radians(df_airports['lon'].values)
-
-    df_airports['euclidean_distance'] = np.sqrt((jfk['lat'] - df_airports['lat'])**2 +  
-                                                 (jfk['lon'] - df_airports['lon'])**2)  
-    R = 6371  
-    dlat = lat_radians - jfk_lat  
-    dlon = lon_radians - radians(jfk['lon'])  
-    a = np.sin(dlat/2)**2 + np.cos(jfk_lat) * np.cos(lat_radians) * np.sin(dlon/2)**2  
-    c = 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))  
-    df_airports['geodesic_distance'] = R * c  
-    flight_speed = 900  
-    df_airports['estimated_flight_time'] = df_airports['geodesic_distance'] / flight_speed
-
-    # Bearing computation  
-    x = np.sin(dlon) * np.cos(lat_radians)  
-    y = np.cos(jfk_lat) * np.sin(lat_radians) - np.sin(jfk_lat) * np.cos(lat_radians) * np.cos(dlon)  
-    initial_bearing = np.degrees(np.arctan2(x, y))  
-    df_airports['bearing'] = (initial_bearing + 360) % 360  
+def preprocess_airports(df_airports, df_flights):
+    """Preprocesses the airports table."""
+    df_airports = augment_airports_with_missing(df_airports, df_flights)
+    df_airports = compute_timezone_info_for_missing(df_airports)
+    df_airports = add_location_info_to_airports(df_airports)
     return df_airports
 
-def preprocess_airports(df_airports, df_flights):  
-    """Orchestrates preprocessing for the airports table."""  
-    df_airports = augment_airports_with_missing(df_airports, df_flights)  
-    df_airports = compute_timezone_info_for_missing(df_airports)  
-    df_airports = add_location_info_to_airports(df_airports)  
-    df_airports = compute_airports_distances(df_airports)  
-    return df_airports
-
-# --- Flight Preprocessing ---  
-def fill_dep_time(df):  
-    """Fills missing departure times using scheduled departure and delay."""  
-    mask = df['dep_time'].isna()  
-    df.loc[mask, 'dep_delay'] = df.loc[mask, 'dep_delay'].fillna(0)  
-    df.loc[mask, 'dep_time'] = df.loc[mask].apply(  
-        lambda row: minutes_to_clock(clock_to_minutes(row['sched_dep_time']) + row['dep_delay']),  
-        axis=1  
-    )  
+# ============================================================================ 
+# Flight Preprocessing 
+# ============================================================================ 
+# (Note: The previous separate fill functions are now integrated in process_all_time_fields)
+def change_sched_time_to_datetime(df):
+    """
+    Replace the raw scheduled times (in HHMM format) with datetime objects using the date from 'time_hour',
+    and update actual times (dep_time and arr_time) as scheduled time plus delay.
+    """
+    df['time_hour'] = df['time_hour'].apply(lambda x: x if isinstance(x, (datetime.datetime, datetime.date))
+                                             else datetime.datetime.fromisoformat(x))
+    def combine_time(row, col):
+        base_date = row['time_hour'].date()
+        try:
+            time_val = int(row[col])
+        except Exception:
+            return None
+        time_str = f"{time_val:04d}"
+        hour = int(time_str[:2])
+        minute = int(time_str[2:])
+        return datetime.datetime.combine(base_date, datetime.time(hour=hour, minute=minute))
+    
+    df['sched_dep_time'] = df.apply(lambda row: combine_time(row, 'sched_dep_time'), axis=1)
+    df['sched_arr_time'] = df.apply(lambda row: combine_time(row, 'sched_arr_time'), axis=1)
+    def adjust_arrival(row):
+        dep = row['sched_dep_time']
+        arr = row['sched_arr_time']
+        if dep and arr and arr < dep:
+            return arr + datetime.timedelta(days=1)
+        return arr
+    df['sched_arr_time'] = df.apply(adjust_arrival, axis=1)
+    if 'dep_delay' in df.columns and 'dep_time' in df.columns:
+        df['dep_time'] = df['sched_dep_time'] + pd.to_timedelta(df['dep_delay'], unit='m')
+    if 'arr_delay' in df.columns and 'arr_time' in df.columns:
+        df['arr_time'] = df['sched_arr_time'] + pd.to_timedelta(df['arr_delay'], unit='m')
     return df
 
-def fill_arr_time(df):  
-    """Fills missing arrival times using scheduled arrival and delay."""  
-    df['arr_delay'] = df['arr_delay'].fillna(0)  
-    mask = df['arr_time'].isna()  
-    df.loc[mask, 'arr_time'] = df.loc[mask].apply(  
-        lambda row: minutes_to_clock(clock_to_minutes(row['sched_arr_time']) + row['arr_delay']),  
-        axis=1  
-    )  
-    return df
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    Calculate the Haversine (geodesic) distance between two points on the Earth.
+    
+    Parameters:
+        lat1, lon1: Latitude and longitude of the first point.
+        lat2, lon2: Latitude and longitude of the second point.
+        
+    Returns:
+        float: Distance in kilometers.
+    """
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = sin(dlat / 2)**2 + cos(lat1) * cos(lat2) * sin(dlon / 2)**2
+    c = 2 * atan2(sqrt(a), sqrt(1 - a))
+    return 6371 * c
 
-def fill_air_time(df):  
-    """Computes air_time for rows missing that value."""  
-    mask = df['air_time'].isna()  
-    df.loc[mask, 'air_time'] = df.loc[mask].apply(  
-        lambda row: clock_to_minutes(row['arr_time']) - clock_to_minutes(row['dep_time']),  
-        axis=1  
-    )  
-    return df
+def compute_flight_bearing(lat1, lon1, lat2, lon2):
+    """
+    Calculate the initial bearing between two points on the Earth.
+    
+    Parameters:
+        lat1, lon1: Latitude and longitude of the first point.
+        lat2, lon2: Latitude and longitude of the second point.
+        
+    Returns:
+        float: Initial bearing in degrees.
+    """
+    lat1, lon1, lat2, lon2 = map(radians, [lat1, lon1, lat2, lon2])
+    dlon = lon2 - lon1
+    y = sin(dlon) * cos(lat2)
+    x = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dlon)
+    return (degrees(atan2(y, x)) + 360) % 360
 
-def preprocess_flights(df_flights):  
-    """Preprocesses the flights table: deduplication, time conversion, and filling missing times."""  
-    df_flights.drop_duplicates(inplace=True)  
-    if 'time_hour' in df_flights.columns:  
-        df_flights['time_hour'] = df_flights['time_hour'].apply(convert_time_hour_to_utc)  
-    df_flights = fill_dep_time(df_flights)  
-    df_flights = fill_arr_time(df_flights)  
-    df_flights = fill_air_time(df_flights)  
+def compute_flight_distances(df_flights, df_airports):
+    """
+    Computes the Euclidean and Geodesic distances for each flight based on the origin and destination
+    airport coordinates, and computes the flight bearing.
+    """
+    origin_coords = df_airports[['faa', 'lat', 'lon']].rename(columns={'faa': 'origin', 'lat': 'origin_lat', 'lon': 'origin_lon'})
+    dest_coords = df_airports[['faa', 'lat', 'lon']].rename(columns={'faa': 'dest', 'lat': 'dest_lat', 'lon': 'dest_lon'})
+    df_flights = df_flights.merge(origin_coords, on='origin', how='left')
+    df_flights = df_flights.merge(dest_coords, on='dest', how='left')
+    df_flights['euclidean_distance'] = np.sqrt((df_flights['dest_lat'] - df_flights['origin_lat'])**2 +
+                                               (df_flights['dest_lon'] - df_flights['origin_lon'])**2)
+    df_flights['geodesic_distance'] = df_flights.apply(lambda row: haversine_distance(row['origin_lat'], row['origin_lon'],
+                                                                                        row['dest_lat'], row['dest_lon']),
+                                                      axis=1)
+    df_flights['bearing'] = df_flights.apply(lambda row: compute_flight_bearing(row['origin_lat'], row['origin_lon'],
+                                                                                row['dest_lat'], row['dest_lon']),
+                                              axis=1)
+    df_flights.drop(columns=['origin_lat', 'origin_lon', 'dest_lat', 'dest_lon'], inplace=True)
     return df_flights
 
-def compute_local_arrival(df, df_airports):  
-    """Computes local arrival time using timezone offsets from the airports table."""  
-    tz_mapping = df_airports.set_index('faa')['tz'].to_dict()  
-    df['origin_offset'] = df['origin'].map(tz_mapping).fillna(0)  
-    df['dest_offset'] = df['dest'].map(tz_mapping).fillna(0)  
-    df['tz_diff'] = df['dest_offset'] - df['origin_offset']  
-    df['arr_minutes'] = df['arr_time'].apply(clock_to_minutes)  
-    df['local_arrival_minutes'] = (df['arr_minutes'] + df['tz_diff'] * 60) % 1440  
-    df['local_arrival'] = df['local_arrival_minutes'].apply(minutes_to_clock)  
-    df.drop(columns=['origin_offset', 'dest_offset', 'tz_diff', 'arr_minutes', 'local_arrival_minutes'], inplace=True)  
+def preprocess_flights(df_flights, df_airports):
+    """Preprocesses the flights table, including integrated time processing and distance computations."""
+    df_flights.drop_duplicates(inplace=True)
+    if 'time_hour' in df_flights.columns:
+        df_flights['time_hour'] = df_flights['time_hour'].apply(ensure_datetime)
+    # Process all time fields (using our integrated function with percentage tolerance).
+    
+    #row-wise single-threaded
+    #df_flights = process_all_time_fields(df_flights, tol_percent=10)
+    
+    #row-wise multithreaded
+    #df_flights = process_all_time_fields_multithreaded(df_flights, tol_percent=10)
+   
+    # vectorized
+    #df_flights = process_all_time_fields_vectorized(df_flights, tol_percent=10)
+    
+    # vectorized and multithreaded
+    df_flights = process_all_time_fields_vectorized_multithreaded(df_flights, tol_percent=10)
+    
+    # Also update scheduled times based on the new conversion function (if needed).
+    df_flights = change_sched_time_to_datetime(df_flights)
+    df_flights = compute_flight_distances(df_flights, df_airports)
+    return df_flights
+
+def compute_local_arrival(df, df_airports):
+    """Computes local arrival time using timezone offsets from the airports table.
+       Here, we use the processed actual arrival datetime (arr_dt) and add the airport's offset."""
+    tz_mapping = df_airports.set_index('faa')['tz'].to_dict()
+    df['dest_offset'] = df['dest'].map(tz_mapping).fillna(0)
+    df['local_arrival'] = df['arr_dt'] + pd.to_timedelta(df['dest_offset'], unit='h')
+    df.drop(columns=['dest_offset'], inplace=True)
     return df
 
-# --- Plane Preprocessing ---  
-def preprocess_planes(df_planes):  
-    """Preprocesses the planes table by converting year and filling missing values."""  
-    df_planes['year'] = pd.to_numeric(df_planes['year'], errors='coerce')  
-    def fill_missing_with_mode(series):  
-        non_null = series.dropna()  
-        if non_null.empty:  
-            return series  
-        mode_val = non_null.mode().iloc[0]  
-        return series.fillna(mode_val)  
-    df_planes['year'] = df_planes.groupby('model')['year'].transform(fill_missing_with_mode)  
+# ============================================================================ 
+# Plane Preprocessing (Manufacture Year Inference & Speed Update) 
+# ============================================================================ 
+def infer_manufacture_year(df_planes):
+    """
+    For each plane model, fills missing 'year' values using the mode (most frequent) year.
+    """
+    def fill_missing_with_mode(series):
+        non_null = series.dropna()
+        if non_null.empty:
+            return series
+        mode_val = non_null.mode().iloc[0]
+        return series.fillna(mode_val)
+    df_planes['year'] = df_planes.groupby('model')['year'].transform(fill_missing_with_mode)
     return df_planes
 
-def update_planes_speed(conn):  
-    """Updates the speed field in the planes table based on flight data."""  
-    df_speed = pd.read_sql_query("""  
-        SELECT tailnum, AVG(60.0 * distance / air_time) AS avg_speed  
-        FROM flights  
-        WHERE air_time > 0  
-        GROUP BY tailnum;  
-    """, conn)  
-    cursor = conn.cursor()  
-    update_data = [(row['avg_speed'], row['tailnum']) for _, row in df_speed.iterrows()]  
-    cursor.executemany(  
-        "UPDATE planes SET speed = ? WHERE tailnum = ? AND (speed IS NULL OR speed = '')",  
-        update_data  
-    )  
-    conn.commit()
+def update_plane_speed(df_flights, df_planes):
+    """
+    Computes average speed (km/h) from flight data for each tailnum and updates the 'speed'
+    column in the planes DataFrame where missing.
+    """
+    valid = df_flights[df_flights['air_time'] > 0]
+    df_speed = valid.groupby('tailnum').apply(lambda x: (60.0 * x['distance'].sum()) / x['air_time'].sum()).reset_index(name='avg_speed')
+    df_planes = df_planes.merge(df_speed, on='tailnum', how='left')
+    df_planes['speed'] = df_planes.apply(lambda row: row['avg_speed'] if pd.isnull(row['speed']) or row['speed'] == '' else row['speed'], axis=1)
+    df_planes.drop(columns=['avg_speed'], inplace=True)
+    return df_planes
 
-# --- Weather Preprocessing ---  
-def merge_airport_data(df_weather, df_airports):  
-    """Merges airport info into the weather table."""  
-    df_airports_subset = df_airports[['faa', 'lat', 'lon', 'tz']]  
+def preprocess_planes(df_planes, df_flights):
+    """Preprocesses the planes table by inferring manufacture year and updating speed."""
+    df_planes['year'] = pd.to_numeric(df_planes['year'], errors='coerce')
+    df_planes = infer_manufacture_year(df_planes)
+    df_planes = update_plane_speed(df_flights, df_planes)
+    return df_planes
+
+# ============================================================================ 
+# Weather Preprocessing 
+# ============================================================================ 
+def merge_airport_data(df_weather, df_airports):
+    """Merges airport info into the weather table."""
+    df_airports_subset = df_airports[['faa', 'lat', 'lon', 'tz']]
     return df_weather.merge(df_airports_subset, left_on='origin', right_on='faa', how='left', suffixes=('', '_airport'))
 
-def convert_time_columns(df_weather):  
-    """Converts the time_hour column in weather to a UTC datetime column."""  
-    df_weather['dt'] = df_weather['time_hour'].apply(convert_time_hour_to_utc)  
+def convert_time_columns(df_weather):
+    """Converts the time_hour column in weather to a UTC datetime column stored in 'dt'."""
+    df_weather['dt'] = df_weather['time_hour'].apply(convert_time_hour_to_utc)
     return df_weather
 
-def get_weather_data_with_backoff(params, max_retries=5):  
-    """Makes an API request for weather data with exponential backoff."""  
-    for attempt in range(max_retries):  
-        try:  
-            response = requests.get(BASE_URL, params=params, timeout=10)  
-        except Exception as e:  
-            print(f"Request exception: {e}")  
-            time.sleep(2 ** attempt)  
-            continue  
-        if response.status_code == 200:  
-            return response.json()  
-        elif response.status_code == 429:  
-            retry_after = response.headers.get("Retry-After")  
-            wait = float(retry_after) if retry_after else 2 ** attempt  
-            print(f"429 received. Retrying after {wait} seconds...")  
-            time.sleep(wait)  
-        else:  
-            print(f"API request failed with status code {response.status_code}")  
-            time.sleep(2 ** attempt)  
+def get_weather_data_with_backoff(params, max_retries=5):
+    """Makes an API request for weather data with exponential backoff."""
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(BASE_URL, params=params, timeout=10)
+        except Exception as e:
+            print(f"Request exception: {e}")
+            time.sleep(2 ** attempt)
+            continue
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            wait = float(retry_after) if retry_after else 2 ** attempt
+            print(f"429 received. Retrying after {wait} seconds...")
+            time.sleep(wait)
+        else:
+            print(f"API request failed with status code {response.status_code}")
+            time.sleep(2 ** attempt)
     return None
 
-def process_origin_weather(origin, df_weather, df_airports):  
-    """For a given origin, updates missing weather data using the API."""  
-    try:  
-        airport_info = df_airports[df_airports['faa'] == origin].iloc[0]  
-    except IndexError:  
-        print(f"Origin {origin} not found in airports data.")  
+def process_origin_weather(origin, df_weather, df_airports):
+    """For a given origin, updates missing weather data using the API."""
+    try:
+        airport_info = df_airports[df_airports['faa'] == origin].iloc[0]
+    except IndexError:
+        print(f"Origin {origin} not found in airports data.")
         return pd.DataFrame()
-    
-    tz = airport_info.get('tz') or 0  
-    tzone = airport_info.get('tzone')  
-    lat = airport_info['lat']  
+    tz = airport_info.get('tz') or 0
+    tzone = airport_info.get('tzone')
+    lat = airport_info['lat']
     lon = airport_info['lon']
-    
-    subset = df_weather[df_weather['origin'] == origin].copy()  
-    if subset.empty:  
+    subset = df_weather[df_weather['origin'] == origin].copy()
+    if subset.empty:
         return subset
-    
-    subset['local_dt'] = subset['dt'] + pd.to_timedelta(tz, unit='h')  
-    start_date = subset['local_dt'].min().strftime("%Y-%m-%d")  
+    subset['local_dt'] = subset['dt'] + pd.to_timedelta(tz, unit='h')
+    start_date = subset['local_dt'].min().strftime("%Y-%m-%d")
     end_date   = subset['local_dt'].max().strftime("%Y-%m-%d")
-    
-    params = {  
-        "latitude": lat,  
-        "longitude": lon,  
-        "start_date": start_date,  
-        "end_date": end_date,  
-        "hourly": HOURLY_PARAMS,  
-        "timezone": tzone  
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start_date,
+        "end_date": end_date,
+        "hourly": HOURLY_PARAMS,
+        "timezone": tzone
     }
-    
-    data = get_weather_data_with_backoff(params)  
-    if not data:  
-        print(f"API request failed for origin {origin}")  
+    data = get_weather_data_with_backoff(params)
+    if not data:
+        print(f"API request failed for origin {origin}")
         return subset
-    
-    hourly_data = data.get("hourly", {})  
-    times = hourly_data.get("time", [])  
-    field_mapping = {  
-        "temperature_2m": "temp",  
-        "dewpoint_2m": "dewp",  
-        "relativehumidity_2m": "humid",  
-        "winddirection_10m": "wind_dir",  
-        "windspeed_10m": "wind_speed",  
-        "windgusts_10m": "wind_gust",  
-        "precipitation": "precip",  
-        "surface_pressure": "pressure",  
-        "visibility": "visib"  
+    hourly_data = data.get("hourly", {})
+    times = hourly_data.get("time", [])
+    field_mapping = {
+        "temperature_2m": "temp",
+        "dewpoint_2m": "dewp",
+        "relativehumidity_2m": "humid",
+        "winddirection_10m": "wind_dir",
+        "windspeed_10m": "wind_speed",
+        "windgusts_10m": "wind_gust",
+        "precipitation": "precip",
+        "surface_pressure": "pressure",
+        "visibility": "visib"
     }
-    
-    for idx, row in subset.iterrows():  
-        target_time = row['local_dt'].strftime("%Y-%m-%dT%H:00")  
-        if target_time in times:  
-            idx_in_hourly = times.index(target_time)  
-            for api_field, df_field in field_mapping.items():  
-                value = hourly_data.get(api_field, [None])[idx_in_hourly]  
-                if df_field == "visib" and value is not None:  
-                    value = value / 1000.0  
-                subset.at[idx, df_field] = value  
-        else:  
-            print(f"Target time {target_time} not found for origin {origin}")  
+    for idx, row in subset.iterrows():
+        target_time = row['local_dt'].strftime("%Y-%m-%dT%H:00")
+        if target_time in times:
+            idx_in_hourly = times.index(target_time)
+            for api_field, df_field in field_mapping.items():
+                value = hourly_data.get(api_field, [None])[idx_in_hourly]
+                if df_field == "visib" and value is not None:
+                    value = value / 1000.0
+                subset.at[idx, df_field] = value
+        else:
+            print(f"Target time {target_time} not found for origin {origin}")
     return subset
 
-def preprocess_weather(df_weather, df_airports):  
-    """Preprocesses the weather data by merging, converting times, and updating missing info."""  
-    df_weather = merge_airport_data(df_weather, df_airports)  
+def preprocess_weather(df_weather, df_airports):
+    """Preprocesses the weather data by merging, converting times, and updating missing info."""
+    df_weather = merge_airport_data(df_weather, df_airports)
     df_weather = convert_time_columns(df_weather)
-    
-    missing_mask = df_weather['temp'].isnull()  
-    missing_df = df_weather[missing_mask].copy()  
+    missing_mask = df_weather['temp'].isnull()
+    missing_df = df_weather[missing_mask].copy()
     unique_origins = missing_df['origin'].unique()
-    
-    if len(unique_origins) <= 4:  
-        updated_subsets = []  
-        from concurrent.futures import ThreadPoolExecutor  
-        with ThreadPoolExecutor(max_workers=len(unique_origins)) as executor:  
-            futures = {executor.submit(process_origin_weather, origin, df_weather, df_airports): origin   
-                       for origin in unique_origins}  
-            for future in concurrent.futures.as_completed(futures):  
-                try:  
-                    updated_subsets.append(future.result())  
-                except Exception as e:  
-                    print(f"Error processing origin {futures[future]}: {e}")  
-        for subset in updated_subsets:  
-            if not subset.empty:  
-                df_weather.loc[subset.index, :] = subset  
-    else:  
-        chunks = np.array_split(missing_df, 4)  
-        updated_chunks = []  
-        from concurrent.futures import ThreadPoolExecutor  
-        with ThreadPoolExecutor(max_workers=4) as executor:  
-            futures = {executor.submit(process_origin_weather, chunk['origin'].iloc[0], df_weather, df_airports): i   
-                       for i, chunk in enumerate(chunks)}  
-            for future in concurrent.futures.as_completed(futures):  
-                try:  
-                    updated_chunks.append(future.result())  
-                except Exception as e:  
-                    print(f"Error processing chunk: {e}")  
-        for chunk in updated_chunks:  
-            if not chunk.empty:  
+    if len(unique_origins) <= 4:
+        updated_subsets = []
+        with ThreadPoolExecutor(max_workers=len(unique_origins)) as executor:
+            futures = {executor.submit(process_origin_weather, origin, df_weather, df_airports): origin for origin in unique_origins}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    updated_subsets.append(future.result())
+                except Exception as e:
+                    print(f"Error processing origin {futures[future]}: {e}")
+        for subset in updated_subsets:
+            if not subset.empty:
+                df_weather.loc[subset.index, :] = subset
+    else:
+        chunks = np.array_split(missing_df, 4)
+        updated_chunks = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(process_origin_weather, chunk['origin'].iloc[0], df_weather, df_airports): i for i, chunk in enumerate(chunks)}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    updated_chunks.append(future.result())
+                except Exception as e:
+                    print(f"Error processing chunk: {e}")
+        for chunk in updated_chunks:
+            if not chunk.empty:
                 df_weather.loc[chunk.index, :] = chunk
-    
-    df_weather.drop(columns=['faa'], inplace=True, errors='ignore')  
+    df_weather.drop(columns=['faa'], inplace=True, errors='ignore')
     return df_weather
 
-# --- Airlines Preprocessing ---  
-def preprocess_airlines(df_airlines):  
-    """Fills missing airline names with 'Unknown'."""  
-    if 'name' in df_airlines.columns:  
-        missing_count = df_airlines['name'].isnull().sum()  
-        if missing_count > 0:  
-            print(f"Filling {missing_count} missing values in 'name' with 'Unknown'.")  
-            df_airlines['name'] = df_airlines['name'].fillna("Unknown")  
-    else:  
-        print("The 'name' column is not present in airlines data.")  
+# ============================================================================ 
+# Airlines Preprocessing 
+# ============================================================================ 
+def preprocess_airlines(df_airlines):
+    """Fills missing airline names with 'Unknown'."""
+    if 'name' in df_airlines.columns:
+        missing_count = df_airlines['name'].isnull().sum()
+        if missing_count > 0:
+            print(f"Filling {missing_count} missing values in 'name' with 'Unknown'.")
+            df_airlines['name'] = df_airlines['name'].fillna("Unknown")
+    else:
+        print("The 'name' column is not present in airlines data.")
     return df_airlines
 
-# --- Preprocessing Orchestration ---  
-def print_missing_values(tables):  
-    """Prints missing values for each DataFrame in the provided dictionary."""  
-    for table_name, df in tables.items():  
-        missing_columns = df.columns[df.isnull().any()]  
-        if not missing_columns.empty:  
-            print(f"Table '{table_name}' has missing values in:")  
-            for col in missing_columns:  
-                print(f"  - {col}: {df[col].isnull().sum()} missing")  
-            print()  
-        else:  
+# ============================================================================ 
+# Preprocessing Orchestration 
+# ============================================================================ 
+def print_missing_values(tables):
+    """Prints missing values for each DataFrame in the provided dictionary."""
+    for table_name, df in tables.items():
+        missing_columns = df.columns[df.isnull().any()]
+        if not missing_columns.empty:
+            print(f"Table '{table_name}' has missing values in:")
+            for col in missing_columns:
+                print(f"  - {col}: {df[col].isnull().sum()} missing")
+            print()
+        else:
             print(f"Table '{table_name}' has no missing values.\n")
 
-def preprocess_data(conn, df_airports, df_flights, df_planes, df_weather, df_airlines):  
-    """Orchestrates the entire preprocessing pipeline."""  
-    df_airlines = preprocess_airlines(df_airlines)  
+def preprocess_data(conn, df_airports, df_flights, df_planes, df_weather, df_airlines):
+    """Orchestrates the entire preprocessing pipeline."""
+    df_airlines = preprocess_airlines(df_airlines)
     print("Missing values in airlines data:\n", df_airlines.isnull().sum())
-    
-    df_airports = preprocess_airports(df_airports, df_flights)  
+    df_airports = preprocess_airports(df_airports, df_flights)
     print("Missing values in airports data:\n", df_airports.isnull().sum())
-    
-    df_flights = preprocess_flights(df_flights)  
+    df_flights = preprocess_flights(df_flights, df_airports)
     print("Missing values in flights data:\n", df_flights.isnull().sum())
-    
-    df_planes = preprocess_planes(df_planes)  
+    df_planes = preprocess_planes(df_planes, df_flights)
     print("Missing values in planes data:\n", df_planes.isnull().sum())
-    
-    df_weather = preprocess_weather(df_weather, df_airports)  
+    df_weather = preprocess_weather(df_weather, df_airports)
     print("Missing values in weather data:\n", df_weather.isnull().sum())
     
-    update_planes_speed(conn)  
+    weather_analysis = analyze_weather_effects(df_flights, df_weather)
+    print("Weather Analysis by Month:\n", weather_analysis)
+    
     df_flights = compute_local_arrival(df_flights, df_airports)
     
-    tables = {  
-        "airports": df_airports,  
-        "flights": df_flights,  
-        "planes": df_planes,  
-        "weather": df_weather,  
-        "airlines": df_airlines  
-    }  
-    print_missing_values(tables)  
+    tables = {
+        "airports": df_airports,
+        "flights": df_flights,
+        "planes": df_planes,
+        "weather": df_weather,
+        "airlines": df_airlines
+    }
+    print_missing_values(tables)
     return df_airports, df_flights, df_planes, df_weather, df_airlines
 
-# ============================================================================  
-# Part 2: Visualizations  
-# ============================================================================  
-def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn):  
-    # World map of airports  
-    fig_world = px.scatter_geo(  
-        df_airports, lat='lat', lon='lon', hover_name='name',  
-        title="Airport Locations Worldwide"  
-    )  
-    fig_world.update_traces(customdata=df_airports['faa'])  
+# ============================================================================ 
+# Visualizations 
+# ============================================================================ 
+def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn):
+    # World map of airports
+    fig_world = px.scatter_geo(df_airports, lat='lat', lon='lon', hover_name='name',
+                                title="Airport Locations Worldwide")
+    fig_world.update_traces(customdata=df_airports['faa'])
     fig_world.update_layout(clickmode='event+select')
     
-    # US airports map  
-    df_us_airports = df_airports[df_airports['tzone'].astype(str).str.contains("America", na=False)]  
-    fig_us = px.scatter_geo(  
-        df_us_airports, lat='lat', lon='lon', hover_name='name',  
-        title="US Airports", scope='usa'  
-    )
+    # US airports map
+    df_us_airports = df_airports[df_airports['tzone'].astype(str).str.contains("America", na=False)]
+    fig_us = px.scatter_geo(df_us_airports, lat='lat', lon='lon', hover_name='name',
+                             title="US Airports", scope='usa')
     
-    # Altitude colored map  
-    fig_alt = px.scatter_geo(  
-        df_airports, lat='lat', lon='lon', hover_name='name', color='alt',  
-        title="Airports by Altitude", color_continuous_scale="viridis"  
-    )
+    # Altitude colored map
+    fig_alt = px.scatter_geo(df_airports, lat='lat', lon='lon', hover_name='name', color='alt',
+                              title="Airports by Altitude", color_continuous_scale="viridis")
     
-    # Distance visualizations  
-    fig_geo_dist = px.scatter_geo(  
-        df_airports, lat='lat', lon='lon', color='geodesic_distance',  
-        hover_name='name', color_continuous_scale='Viridis',  
-        title="Geodesic Distance from JFK"  
-    )  
-    fig_geo_dist.update_geos(showcoastlines=True, coastlinecolor="Black")
+    # Flight distance histograms
+    fig_hist_euc = px.histogram(df_flights, x='euclidean_distance',
+                                nbins=50, title="Euclidean Distance Distribution (Flight Data)")
+    fig_hist_geo = px.histogram(df_flights, x='geodesic_distance',
+                                nbins=50, title="Geodesic Distance Distribution (Flight Data)")
     
-    fig_euclidean = px.scatter_geo(  
-        df_airports, lat='lat', lon='lon', color='euclidean_distance',  
-        hover_name='name', color_continuous_scale='Viridis',  
-        title="Euclidean Distance from JFK"  
-    )  
-    fig_euclidean.update_geos(showcoastlines=True, coastlinecolor="Black")
+    # Comparison: Computed vs. DB Flight Distances
+    df_flight_distance = df_flights.groupby('dest')['geodesic_distance'].mean().reset_index(name='avg_geodesic_distance')
+    df_db_distance = pd.read_sql_query("""
+        SELECT dest, AVG(distance) AS avg_flight_distance
+        FROM flights
+        GROUP BY dest;
+    """, conn)
+    df_compare = pd.merge(df_flight_distance, df_db_distance, on="dest", how="left")
+    fig_compare = px.scatter(df_compare, x='avg_geodesic_distance', y='avg_flight_distance',
+                              title="Computed vs. DB Flight Distances", opacity=0.6,
+                              labels={'avg_geodesic_distance': "Avg Computed Geodesic Distance (km)",
+                                      'avg_flight_distance': "Avg Flight Distance (km)"})
     
-    fig_hist_euc = px.histogram(  
-        df_airports, x='euclidean_distance',  
-        nbins=50, title="Euclidean Distance Distribution"  
-    )  
-    fig_hist_geo = px.histogram(  
-        df_airports, x='geodesic_distance',  
-        nbins=50, title="Geodesic Distance Distribution"  
-    )  
-    fig_hist_time = px.histogram(  
-        df_airports, x='estimated_flight_time',  
-        nbins=50, title="Estimated Flight Time Distribution"  
-    )
+    # Compute duration using processed actual departure and arrival times.
+    dep_dt = pd.to_datetime(df_flights['dep_dt'], utc=True)
+    arr_dt = pd.to_datetime(df_flights['arr_dt'], utc=True)
+    df_flights['computed_duration'] = ((arr_dt - dep_dt).dt.total_seconds() / 60)
+    fig_duration = px.scatter(df_flights, 
+                              x='computed_duration', 
+                              y='air_time', 
+                              title="Computed Flight Duration vs. Recorded Air Time", 
+                              labels={'computed_duration': 'Computed Duration (min)', 'air_time': 'Air Time (min)'})
     
-    # Comparison: Computed vs. DB Flight Distances  
-    df_flight_distance = pd.read_sql_query("""  
-        SELECT dest, AVG(distance) AS avg_flight_distance  
-        FROM flights  
-        GROUP BY dest;  
-    """, conn)  
-    df_compare = pd.merge(df_airports, df_flight_distance, left_on="faa", right_on="dest", how="left")  
-    fig_compare = px.scatter(  
-        df_compare, x='geodesic_distance', y='avg_flight_distance',  
-        title="Computed vs. DB Flight Distances", opacity=0.6,  
-        labels={'geodesic_distance': "Geodesic Distance (km)",  
-                'avg_flight_distance': "Avg Flight Distance (km)"}  
-    )
-    
-    # Weather & Flight Correlation  
-    df_sample = pd.read_sql_query("""  
-        SELECT rowid, dest, air_time, time_hour  
-        FROM flights  
-        WHERE air_time IS NOT NULL  
-        LIMIT 500;  
-    """, conn)  
-    df_merged_weather = pd.merge(  
-        df_sample, df_weather[['time_hour','wind_speed','wind_dir']],  
-        on='time_hour', how='left'  
-    )  
-    df_merged_weather = pd.merge(  
-        df_merged_weather, df_airports[['faa','bearing']],  
-        left_on='dest', right_on='faa', how='left'  
-    )  
-    df_merged_weather['bearing_rad'] = df_merged_weather['bearing'].apply(lambda x: np.radians(x) if pd.notnull(x) else np.nan)  
-    df_merged_weather['wind_dir_rad'] = df_merged_weather['wind_dir'].apply(lambda x: np.radians(x) if pd.notnull(x) else np.nan)  
-    df_merged_weather['inner_product'] = (  
-        df_merged_weather['wind_speed'] *  
-        np.cos(df_merged_weather['bearing_rad'] - df_merged_weather['wind_dir_rad'])  
-    )  
-    fig_inner_product = px.scatter(  
-        df_merged_weather, x='inner_product', y='air_time',  
-        title="Inner Product vs. Air Time", opacity=0.5,  
-        labels={'inner_product': "Inner Product (Flight Dir · Wind Vec)",  
-                'air_time': "Air Time (min)"}  
-    )  
+    # Inner Product vs Air Time
+    df_sample = pd.read_sql_query("""
+        SELECT rowid, dest, air_time, time_hour, bearing
+        FROM flights
+        WHERE air_time IS NOT NULL
+        LIMIT 500;
+    """, conn)
+    df_sample['time_hour'] = df_sample['time_hour'].apply(ensure_datetime)
+    df_weather['dt'] = df_weather['dt'].apply(ensure_datetime)
+    df_merged_weather = pd.merge(df_sample, df_weather[['dt', 'wind_speed', 'wind_dir']],
+                                 left_on='time_hour', right_on='dt', how='left')
+    df_merged_weather['inner_product'] = df_merged_weather.apply(
+        lambda row: calculate_inner_product(row['bearing'], row['wind_dir'], row['wind_speed']), axis=1)
+    fig_inner_product = px.scatter(df_merged_weather, x='inner_product', y='air_time',
+                                   title="Inner Product vs. Air Time", opacity=0.5,
+                                   labels={'inner_product': "Inner Product (Flight Dir · Wind Vec)",
+                                           'air_time': "Air Time (min)"})
     corr_val = df_merged_weather['inner_product'].corr(df_merged_weather['air_time'])
     
-    # Airline delay bar chart  
-    if 'dep_delay' in df_flights.columns and 'carrier' in df_flights.columns:  
-        df_airline_delay = pd.merge(df_flights, df_airlines, on='carrier', how='left')  
-        group_delay = df_airline_delay.groupby('name')['dep_delay'].mean().reset_index()  
-        fig_airline_delay = px.bar(group_delay, x='name', y='dep_delay',   
-                                   title="Average Departure Delay per Airline",  
-                                   labels={'dep_delay': 'Avg Dep Delay (min)', 'name': 'Airline'})  
-    else:  
+    # Airline delay bar chart
+    if 'dep_delay' in df_flights.columns and 'carrier' in df_flights.columns:
+        df_airline_delay = pd.merge(df_flights, df_airlines, on='carrier', how='left')
+        group_delay = df_airline_delay.groupby('name')['dep_delay'].mean().reset_index().sort_values('dep_delay', ascending=False)
+        fig_airline_delay = px.bar(group_delay, x='name', y='dep_delay',
+                                   title="Average Departure Delay per Airline",
+                                   labels={'dep_delay': 'Avg Dep Delay (min)', 'name': 'Airline'})
+    else:
         fig_airline_delay = go.Figure()
     
-    df_delay = df_flights[['distance', 'arr_delay']].dropna()  
-    fig_distance_delay = px.scatter(df_delay, x='distance', y='arr_delay',   
-                                    title="Flight Distance vs Arrival Delay",  
-                                    labels={'distance':'Flight Distance (km)', 'arr_delay':'Arrival Delay (min)'})  
-    corr_value_delay = df_delay['distance'].corr(df_delay['arr_delay'])
-    
-    df_tz = pd.merge(df_flights, df_airports[['faa', 'tz']], left_on='dest', right_on='faa', how='left')  
-    df_tz_counts = df_tz.groupby('tz').size().reset_index(name='count')  
-    fig_timezone = px.bar(df_tz_counts, x='tz', y='count',   
-                          title="Number of Flights by Destination Time Zone",  
-                          text='count',  
-                          labels={'tz': 'Time Zone', 'count': 'Flight Count'})
-    
-    visualizations = {  
-        "fig_world": fig_world,  
-        "fig_us": fig_us,  
-        "fig_alt": fig_alt,  
-        "fig_geo_dist": fig_geo_dist,  
-        "fig_euclidean": fig_euclidean,  
-        "fig_hist_euc": fig_hist_euc,  
-        "fig_hist_geo": fig_hist_geo,  
-        "fig_hist_time": fig_hist_time,  
-        "fig_compare": fig_compare,  
-        "fig_airline_delay": fig_airline_delay,  
-        "fig_distance_delay": fig_distance_delay,  
-        "fig_inner_product": fig_inner_product,  
-        "fig_timezone": fig_timezone,  
-        "corr_val": corr_val,  
-        "corr_value_delay": corr_value_delay  
+    # Build dictionary of visualizations.
+    visualizations = {
+        "fig_world": fig_world,
+        "fig_us": fig_us,
+        "fig_alt": fig_alt,
+        "fig_hist_euc": fig_hist_euc,
+        "fig_hist_geo": fig_hist_geo,
+        "fig_compare": fig_compare,
+        "fig_duration": fig_duration,
+        "fig_airline_delay": fig_airline_delay,
+        "fig_inner_product": fig_inner_product,
+        "corr_val": corr_val
     }
-    
     return visualizations
 
-# ============================================================================  
-# Part 4: Main Execution  
-# ============================================================================  
-if __name__ == '__main__':  
+# ============================================================================ 
+# Dashboard Using Streamlit 
+# ============================================================================ 
+def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, conn):
+    st.title("Flights Dashboard")
+    
+    # Sidebar filters
+    departure_filter = st.sidebar.selectbox("Select Departure Airport", sorted(df_airports['faa'].unique()))
+    arrival_filter = st.sidebar.selectbox("Select Arrival Airport", sorted(df_airports['faa'].unique()))
+    
+    # Sidebar tab selection
+    tab = st.sidebar.radio("Select Tab", options=[
+        "General Statistics",
+        "Maps",
+        "Distance and Delay Analysis",
+        "Inner Product vs Air Time",
+        "Time Zone Analysis",
+        "Weather Analysis",
+        "Flight Stats by Route",
+        "Daily Destinations",
+        "Route Planning",
+        "Trajectory Analysis",
+        "Manufacturer Analysis"
+    ])
+    
+    if tab == "General Statistics":
+        st.header("General Statistics for NYC Flights")
+        total_flights = len(df_flights)
+        avg_dep_delay = df_flights['dep_delay'].mean()
+        avg_arr_delay = df_flights['arr_delay'].mean()
+        st.write(f"**Total Flights Departing NYC:** {total_flights}")
+        st.write(f"**Average Departure Delay:** {avg_dep_delay:.2f} minutes")
+        st.write(f"**Average Arrival Delay:** {avg_arr_delay:.2f} minutes")
+        analysis_df = analyze_weather_effects(df_flights, df_weather)
+        st.plotly_chart(plot_weather_analysis(analysis_df))
+    
+    elif tab == "Maps":
+        st.header("Maps")
+        fig_world = px.scatter_geo(
+            df_airports, lat='lat', lon='lon', hover_name='name',
+            color='alt', title="Airport Locations Worldwide", color_continuous_scale="viridis"
+        )
+        fig_world.update_traces(customdata=df_airports['faa'])
+        fig_world.update_layout(clickmode='event+select')
+        st.write("World Map of Airports")
+        st.plotly_chart(fig_world)
+        df_us_airports = df_airports[df_airports['country'].astype(str).str.contains("United States", na=False)]
+        fig_us = px.scatter_geo(
+            df_us_airports, lat='lat', lon='lon', hover_name='name',
+            title="US Airports", scope='usa'
+        )
+        st.write("US Airports Map")
+        st.plotly_chart(fig_us)
+    
+    elif tab == "Distance and Delay Analysis":
+        st.header("Distance and Delay Analysis")
+        st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_duration"])
+        st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_hist_euc"])
+        st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_hist_geo"])
+        st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_compare"])
+        if 'dep_delay' in df_flights.columns and 'carrier' in df_flights.columns:
+            st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_airline_delay"])
+    
+    elif tab == "Inner Product vs Air Time":
+        st.header("Inner Product vs. Air Time")
+        st.plotly_chart(create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)["fig_inner_product"])
+        st.write(f"Correlation: {create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)['corr_val']:.2f}")
+    
+    elif tab == "Time Zone Analysis":
+        df_tz = pd.merge(df_flights, df_airports[['faa', 'tz']], left_on='dest', right_on='faa', how='left')
+        df_tz_counts = df_tz.groupby('tz').size().reset_index(name='count')
+        fig_timezone = px.bar(df_tz_counts, x='tz', y='count',
+                              title="Number of Flights by Destination Time Zone",
+                              text='count', labels={'tz': 'Time Zone', 'count': 'Flight Count'})
+        st.header("Flight Counts by Destination Time Zone")
+        st.plotly_chart(fig_timezone)
+    
+    elif tab == "Weather Analysis":
+        st.header("Detailed Weather Effects Analysis")
+        analysis_df = analyze_weather_effects(df_flights, df_weather)
+        st.plotly_chart(plot_weather_analysis(analysis_df))
+    
+    elif tab == "Flight Stats by Route":
+        st.header("Flight Statistics by Airport")
+        st.write("Using the sidebar filters, the following statistics are computed:")
+        stats_df = df_flights[(df_flights['origin'] == departure_filter) & (df_flights['dest'] == arrival_filter)]
+        if stats_df.empty:
+            st.write("No flights found for the selected route.")
+        else:
+            st.write(f"**Total Flights from {departure_filter} to {arrival_filter}:** {len(stats_df)}")
+            st.write(f"**Average Departure Delay:** {stats_df['dep_delay'].mean():.2f} minutes")
+            st.write(f"**Average Arrival Delay:** {stats_df['arr_delay'].mean():.2f} minutes")
+            fig_route = px.histogram(stats_df, x='dep_delay', nbins=30,
+                                     title=f"Departure Delay Distribution for {departure_filter} → {arrival_filter}")
+            st.plotly_chart(fig_route)
+    
+    elif tab == "Daily Destinations":
+        st.header("Daily Flight Destinations & Statistics")
+        col1, col2, col3 = st.columns(3)
+        month = col1.number_input("Month (1-12)", min_value=1, max_value=12, value=1)
+        day = col2.number_input("Day (1-31)", min_value=1, max_value=31, value=1)
+        origin = col3.selectbox("Select Origin Airport", sorted(df_airports['faa'].unique()), key="daily_origin")
+        if st.button("Get Daily Stats", key="daily_stats"):
+            df_daily = df_flights.copy()
+            df_daily['month'] = df_daily['time_hour'].apply(ensure_datetime).dt.month
+            df_daily['day'] = df_daily['time_hour'].apply(ensure_datetime).dt.day
+            df_filtered = df_daily[(df_daily['month'] == month) & (df_daily['day'] == day) & (df_daily['origin'] == origin)]
+            if df_filtered.empty:
+                st.write("No flights found for the given date and origin.")
+            else:
+                dest_counts = df_filtered['dest'].value_counts()
+                total_flights = len(df_filtered)
+                unique_dest = df_filtered['dest'].nunique()
+                most_freq_dest = dest_counts.idxmax()
+                stats_text = f"Total Flights: {total_flights}, Unique Destinations: {unique_dest}, Most Frequent Destination: {most_freq_dest}"
+                st.write(stats_text)
+                dest_airports = df_airports[df_airports['faa'].isin(df_filtered['dest'].unique())]
+                fig = px.scatter_geo(dest_airports, lat='lat', lon='lon', hover_name='name',
+                                     title=f"Destinations on {month}/{day} from {origin}")
+                st.plotly_chart(fig)
+    
+    elif tab == "Route Planning":
+        st.header("Route Planning")
+        faa_options = df_airports[['faa', 'name']].drop_duplicates()
+        options = faa_options['faa'].tolist()
+        selected_airports = st.multiselect("Select destination airports (FAA codes)", options, key="route_plan")
+        if st.button("Plot Routes", key="plot_routes"):
+            fig = go.Figure()
+            if selected_airports:
+                us_only = use_us_scope(selected_airports, df_airports)
+                geo_scope = 'usa' if us_only else None
+                jfk = df_airports[df_airports['faa'] == "JFK"].iloc[0]
+                for code in selected_airports:
+                    dest = df_airports[df_airports['faa'] == code]
+                    if not dest.empty:
+                        dest = dest.iloc[0]
+                        fig.add_trace(go.Scattergeo(
+                            locationmode='USA-states' if us_only else None,
+                            lon=[jfk['lon'], dest['lon']],
+                            lat=[jfk['lat'], dest['lat']],
+                            mode='lines',
+                            line=dict(width=2, color='red'),
+                            name=f"JFK to {code}"
+                        ))
+                fig.update_layout(geo=dict(scope=geo_scope))
+            st.plotly_chart(fig)
+    
+    elif tab == "Trajectory Analysis":
+        st.header("Flight Trajectory Analysis")
+        origin_sel = st.selectbox("Select Origin Airport", sorted(df_airports['faa'].unique()), key="traj_origin")
+        dest_options = df_flights[df_flights['origin'] == origin_sel]['dest'].unique().tolist()
+        dest_sel = st.selectbox("Select Destination Airport", sorted(dest_options), key="traj_dest")
+        if st.button("Analyze Trajectory", key="traj_analyze"):
+            df_route = df_flights[(df_flights['origin'] == origin_sel) & (df_flights['dest'] == dest_sel)]
+            if df_route.empty:
+                st.write(f"No flights found from {origin_sel} to {dest_sel}.")
+            else:
+                df_route = pd.merge(df_route, df_planes[['tailnum', 'type']], on='tailnum', how='left')
+                counts = df_route['type'].value_counts().to_dict()
+                st.write("Plane type counts for this trajectory:")
+                st.write(counts)
+    
+    elif tab == "Manufacturer Analysis":
+        st.header("Top 5 Airplane Manufacturers by Destination")
+        dest_input = st.text_input("Enter Destination FAA Code", "", key="manuf_input")
+        if st.button("Get Manufacturers", key="manuf_button"):
+            query = """
+                SELECT p.manufacturer, COUNT(*) AS count
+                FROM flights f
+                JOIN planes p ON f.tailnum = p.tailnum
+                WHERE f.dest = ?
+                GROUP BY p.manufacturer
+                ORDER BY count DESC
+                LIMIT 5;
+            """
+            new_conn = sqlite3.connect("preprocessed_flights.db")
+            df_manuf = pd.read_sql_query(query, new_conn, params=(dest_input,))
+            new_conn.close()
+            if df_manuf.empty:
+                st.write(f"No data found for destination {dest_input}.")
+            else:
+                st.write(df_manuf)
+
+# ============================================================================ 
+# Main Execution 
+# ============================================================================ 
+if __name__ == '__main__':
     conn, df_airports, df_flights, df_planes, df_weather, df_airlines = load_data()
-    
-    preprocessed_db = "preprocessed_flights.db"  
-    if os.path.exists(preprocessed_db):  
-        print("Loading preprocessed data from", preprocessed_db)  
-        conn2 = sqlite3.connect(preprocessed_db)  
-        df_airports = pd.read_sql_query("SELECT * FROM airports", conn2)  
-        df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn2)  
-        df_flights  = pd.read_sql_query("SELECT * FROM flights", conn2)  
-        df_planes   = pd.read_sql_query("SELECT * FROM planes", conn2)  
-        df_weather  = pd.read_sql_query("SELECT * FROM weather", conn2)  
-        conn2.close()  
-    else:  
-        df_airports, df_flights, df_planes, df_weather, df_airlines = preprocess_data(  
-            conn, df_airports, df_flights, df_planes, df_weather, df_airlines  
-        )  
+    preprocessed_db = "preprocessed_flights.db"
+    if os.path.exists(preprocessed_db):
+        st.write("Loading preprocessed data from", preprocessed_db)
+        conn_preprocessed = sqlite3.connect(preprocessed_db)
+        df_airports = pd.read_sql_query("SELECT * FROM airports", conn_preprocessed)
+        df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn_preprocessed)
+        df_flights  = pd.read_sql_query("SELECT * FROM flights", conn_preprocessed)
+        df_planes   = pd.read_sql_query("SELECT * FROM planes", conn_preprocessed)
+        df_weather  = pd.read_sql_query("SELECT * FROM weather", conn_preprocessed)
+    else:
+        df_airports, df_flights, df_planes, df_weather, df_airlines = preprocess_data(conn, df_airports, df_flights, df_planes, df_weather, df_airlines)
         save_preprocessed_data(df_airports, df_flights, df_planes, df_weather, df_airlines, preprocessed_db)
+        conn_preprocessed = sqlite3.connect(preprocessed_db)
     
-    # Create visualizations  
-    visualizations = create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn)
-    
-    # Instead of running a dashboard, iterate through the visualizations dictionary and show the figures  
-    for key, fig in visualizations.items():  
-        if hasattr(fig, "show"):  
-            print(f"Showing visualization: {key}")  
-            fig.show()  
-        else:  
-            print(f"{key}: {fig}")
+    visualizations = create_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, conn_preprocessed)
+    run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, conn_preprocessed)
