@@ -315,8 +315,8 @@ def compute_sched_datetimes(df):
     HHMM fields using vectorized operations. Also adjusts for overnight scheduled arrivals.
     """
     # Convert base times
-    df['base_dt'] = vectorized_ensure_datetime(df['time_hour'])
-    df['base_date'] = df['base_dt'].dt.floor('D')
+    df['time_hour'] = vectorized_ensure_datetime(df['time_hour'])
+    df['base_date'] = df['time_hour'].dt.floor('D')
     
     # Compute scheduled departure and arrival datetimes
     df['sched_dep_dt'] = vectorized_clock_to_datetime(df['sched_dep_time'], df['base_date'])
@@ -349,6 +349,9 @@ def process_departure_times(df, tol_percent=10):
     df.loc[missing_dep_time, 'dep_dt'] = df.loc[missing_dep_time, 'sched_dep_dt'] + \
         pd.to_timedelta(df.loc[missing_dep_time, 'dep_delay'].fillna(0), unit='m')
     
+    overnight_mask = df['dep_dt'] < (df['time_hour']-pd.to_timedelta(1,unit='h'))
+    df.loc[overnight_mask, 'dep_dt'] = df.loc[overnight_mask, 'dep_dt'] + pd.to_timedelta(1,unit='d')
+
     # Compute the computed departure delay (in minutes)
     df['computed_dep_delay'] = (df['dep_dt'] - df['sched_dep_dt']).dt.total_seconds() / 60.0
     
@@ -1104,9 +1107,14 @@ def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_air
 def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, conn):
     st.title("Flights Dashboard")
     
+    
+    dep_airports = sorted(df_flights['origin'].unique())
+    arr_airports = sorted(df_flights['dest'].unique())
+
     # Sidebar filters
-    departure_filter = st.sidebar.selectbox("Select Departure Airport", sorted(df_airports['faa'].unique()))
-    arrival_filter = st.sidebar.selectbox("Select Arrival Airport", sorted(df_airports['faa'].unique()))
+    departure_filter = st.sidebar.selectbox("Select Departure Airport", dep_airports)
+    arrival_filter = st.sidebar.selectbox("Select Arrival Airport", arr_airports)
+
     
     # Sidebar tab selection
     tab = st.sidebar.radio("Select Tab", options=[
@@ -1229,6 +1237,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
             if selected_airports:
                 us_only = use_us_scope(selected_airports, df_airports)
                 geo_scope = 'usa' if us_only else None
+                fig.update_layout(geo=dict(scope=geo_scope))
                 jfk = df_airports[df_airports['faa'] == "JFK"].iloc[0]
                 for code in selected_airports:
                     dest = df_airports[df_airports['faa'] == code]
@@ -1242,7 +1251,6 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
                             line=dict(width=2, color='red'),
                             name=f"JFK to {code}"
                         ))
-                fig.update_layout(geo=dict(scope=geo_scope))
             st.plotly_chart(fig)
     
     elif tab == "Trajectory Analysis":
@@ -1281,6 +1289,16 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
             else:
                 st.write(df_manuf)
 
+@st.cache_data
+def load_preprocessed_data(preprocessed_db):
+    conn = sqlite3.connect(preprocessed_db)
+    df_airports = pd.read_sql_query("SELECT * FROM airports", conn)
+    df_flights = pd.read_sql_query("SELECT * FROM flights", conn)
+    df_planes = pd.read_sql_query("SELECT * FROM planes", conn)
+    df_weather = pd.read_sql_query("SELECT * FROM weather", conn)
+    df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn)
+    return df_airports, df_flights, df_planes, df_weather, df_airlines
+
 # ============================================================================ 
 # Main Execution 
 # ============================================================================ 
@@ -1290,11 +1308,7 @@ if __name__ == '__main__':
     if os.path.exists(preprocessed_db):
         st.write("Loading preprocessed data from", preprocessed_db)
         conn_preprocessed = sqlite3.connect(preprocessed_db)
-        df_airports = pd.read_sql_query("SELECT * FROM airports", conn_preprocessed)
-        df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn_preprocessed)
-        df_flights  = pd.read_sql_query("SELECT * FROM flights", conn_preprocessed)
-        df_planes   = pd.read_sql_query("SELECT * FROM planes", conn_preprocessed)
-        df_weather  = pd.read_sql_query("SELECT * FROM weather", conn_preprocessed)
+        df_airports, df_flights, df_planes, df_weather, df_airlines= load_preprocessed_data(preprocessed_db)
     else:
         df_airports, df_flights, df_planes, df_weather, df_airlines = preprocess_data(conn, df_airports, df_flights, df_planes, df_weather, df_airlines)
         save_preprocessed_data(df_airports, df_flights, df_planes, df_weather, df_airlines, preprocessed_db)
