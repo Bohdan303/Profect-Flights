@@ -391,6 +391,22 @@ def calculate_inner_product(bearing, wind_dir, wind_speed):
     """
     return wind_speed * np.cos(np.radians(bearing) - np.radians(wind_dir))
 
+def get_delayed_flights_count(df_flights, start_month, end_month, destination, delay_threshold=0):
+    """
+    Returns the number of flights to the given destination within the specified month range
+    that have a departure delay greater than the specified threshold (default > 0 minutes).
+    """
+    # Ensure the month column exists
+    df_flights["month"] = df_flights["time_hour"].apply(ensure_datetime).dt.month
+    # Filter for flights with destination matching and within the month range and with delay
+    delayed_flights = df_flights[
+        (df_flights["dest"] == destination) &
+        (df_flights["month"] >= start_month) &
+        (df_flights["month"] <= end_month) &
+        (df_flights["dep_delay_final"] > delay_threshold)
+    ]
+    return delayed_flights.shape[0]
+
 
 # ============================================================================
 # Database Loading and Saving
@@ -1467,6 +1483,16 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
                     title=f"Destinations on {month}/{day} from {origin}",
                 )
                 st.plotly_chart(fig_day)
+        
+        st.subheader("Delayed Flights by Destination for a Range of Months")
+        
+        col1, col2, col3 = st.columns(3)
+        start_month = col1.number_input("Start Month", min_value=1, max_value=12, value=1, key="start_month_delayed")
+        end_month = col2.number_input("End Month", min_value=1, max_value=12, value=12, key="end_month_delayed")
+        destination = col3.selectbox("Select Destination for Delay Count", sorted(df_flights["dest"].unique()), key="dest_delay_count")
+        if st.button("Get Delayed Flight Count", key="delayed_count_button"):
+            count = get_delayed_flights_count(df_flights, start_month, end_month, destination)
+            st.write(f"Number of delayed flights to {destination} between months {start_month} and {end_month}: {count}")
 
     # ---------------------------
     # Trajectory Statistics Tab
@@ -1513,6 +1539,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
                 st.write(f"No data found for destination {dest_input}.")
             else:
                 st.write(df_manuf)
+            
 
     # ---------------------------
     # Plane Type Analysis Tab
