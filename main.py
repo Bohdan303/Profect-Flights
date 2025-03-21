@@ -1416,7 +1416,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
                                 lat=[origin["lat"], dest["lat"]],
                                 mode="lines",
                                 line=dict(width=2, color="red"),
-                                name=f"{df_airports[df_airports["faa"] == origin_code]["name"].iloc[0]} to {df_airports[df_airports["faa"] == code]["name"].iloc[0]}",
+                                name=f"{origin_code} to {code}",
                             )
                         )
             st.plotly_chart(fig)
