@@ -1395,9 +1395,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
     # ---------------------------
     elif tab == "Flight Routes":
         st.header("Flight Routes")
-        faa_options = df_airports[["faa", "name"]].drop_duplicates()
-        options = faa_options["faa"].tolist()
-        selected_airports = st.multiselect("Select destination airports (FAA codes)", options, key="route_plan")
+        selected_airports = st.multiselect("Select destination airports (FAA codes)",  sorted(df_flights["dest"].unique()), key="route_plan")
         if st.button("Plot Routes", key="plot_routes"):
             fig = go.Figure()
             if selected_airports:
@@ -1405,19 +1403,20 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
                 geo_scope = "usa" if us_only else None
                 fig.update_layout(geo=dict(scope=geo_scope))
                 # Using JFK as the base
-                jfk = df_airports[df_airports["faa"] == "JFK"].iloc[0]
                 for code in selected_airports:
                     dest = df_airports[df_airports["faa"] == code]
+                    origin_code = df_flights[df_flights["dest"] == code]["origin"].iloc[0]
+                    origin = df_airports[df_airports["faa"] == origin_code].iloc[0]
                     if not dest.empty:
                         dest = dest.iloc[0]
                         fig.add_trace(
                             go.Scattergeo(
                                 locationmode="USA-states" if us_only else None,
-                                lon=[jfk["lon"], dest["lon"]],
-                                lat=[jfk["lat"], dest["lat"]],
+                                lon=[origin["lon"], dest["lon"]],
+                                lat=[origin["lat"], dest["lat"]],
                                 mode="lines",
                                 line=dict(width=2, color="red"),
-                                name=f"JFK to {code}",
+                                name=f"{df_airports["faa" == origin]["name"]} to {df_airports["faa" == code]["name"]}",
                             )
                         )
             st.plotly_chart(fig)
@@ -1475,7 +1474,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
     elif tab == "Trajectory Statistics":
         st.header("Trajectory Statistics")
         st.subheader("Trajectory Analysis by Plane Type")
-        origin_sel = st.selectbox("Select Origin Airport", sorted(df_airports["faa"].unique()), key="traj_origin")
+        origin_sel = st.selectbox("Select Origin Airport", sorted(df_flights["origin"].unique()), key="traj_origin")
         dest_options = df_flights[df_flights["origin"] == origin_sel]["dest"].unique().tolist()
         dest_sel = st.selectbox("Select Destination Airport", sorted(dest_options), key="traj_dest")
         if st.button("Analyze Trajectory", key="traj_analyze"):
@@ -1496,7 +1495,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
         st.subheader("Average Departure Delay by Airline")
         st.plotly_chart(visuals["fig_airline_delay"])
         st.subheader("Top 5 Manufacturers for a Destination")
-        dest_input = st.text_input("Enter Destination FAA Code", "", key="manuf_input")
+        dest_input = st.selectbox("select Destination ", sorted(df_flights["dest"].unique()), key="manuf_input")
         if st.button("Get Manufacturer Stats", key="manuf_button"):
             query = """
                 SELECT p.manufacturer, COUNT(*) AS count
