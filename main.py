@@ -229,7 +229,7 @@ def process_arrival_times(df, tol_percent=10):
         missing_arr_time, "sched_arr_dt"
     ] + pd.to_timedelta(df.loc[missing_arr_time, "arr_delay"].fillna(0), unit="m")
 
-    overnight_mask = df["arr_dt"] < (df["time_hour"] - pd.to_timedelta(3, unit="h") + pd.to_timedelta(df["computed_sched_air_time"], unit="m"))
+    overnight_mask = df["arr_dt"] < (df["time_hour"] - pd.to_timedelta(1, unit="h") + pd.to_timedelta(df["computed_sched_air_time"], unit="m"))
     df.loc[overnight_mask, "arr_dt"] = df.loc[
         overnight_mask, "arr_dt"
     ] + pd.to_timedelta(1, unit="d")
@@ -1442,7 +1442,7 @@ def run_dashboard(df_airports, df_flights, df_planes, df_weather, df_airlines, c
         col1, col2, col3 = st.columns(3)
         month = col1.number_input("Month (1-12)", min_value=1, max_value=12, value=1)
         day = col2.number_input("Day (1-31)", min_value=1, max_value=31, value=1)
-        origin = col3.selectbox("Select Origin Airport", sorted(df_airports["faa"].unique()), key="daily_origin")
+        origin = col3.selectbox("Select Origin Airport", sorted(df_flights["origin"].unique()), key="daily_origin")
         if st.button("Get Daily Stats", key="daily_stats"):
             df_daily = df_flights.copy()
             df_daily["month"] = df_daily["time_hour"].apply(ensure_datetime).dt.month
