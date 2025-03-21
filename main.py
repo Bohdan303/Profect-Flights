@@ -1077,66 +1077,108 @@ def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_air
         },
     )
     
-    df_sample = pd.read_sql_query(
-        """
-        SELECT rowid, origin, dest, air_time, time_hour, bearing, month
-        FROM flights
-        WHERE air_time_final IS NOT NULL
-        """,
-        conn,
-    )
-    df_sample["time_hour"] = ensure_datetime(df_sample["time_hour"])
-    df_weather["dt"] = ensure_datetime(df_weather["dt"])
+    # df_sample = pd.read_sql_query(
+    # """
+    # SELECT rowid, origin, dest, air_time, time_hour, bearing, day, month
+    # FROM flights
+    # WHERE air_time_final IS NOT NULL
+    # """,
+    # conn,
+    # )
 
-    # Define the three origins.
-    origins = df_sample["origin"].unique().tolist()
+    # # Ensure the time columns are datetime.
+    # df_sample["time_hour"] = ensure_datetime(df_sample["time_hour"])
+    # df_weather["dt"] = ensure_datetime(df_weather["dt"])
 
-    # Split flight data by origin.
-    df_origin_dict = {origin: df_sample[df_sample["origin"] == origin].copy() for origin in origins}
+    # # Get the list of origins (for example, JFK, EWR, LGA—or all unique origins)
+    # origins = df_sample["origin"].unique().tolist()
 
-    # Split weather data by origin.
-    weather_by_origin = {origin: df_weather[df_weather["origin"] == origin].copy() for origin in origins}
+    # # Split flight data by origin.
+    # df_origin_dict = {origin: df_sample[df_sample["origin"] == origin].copy() for origin in origins}
 
-    # For each origin, split the weather data into 12 subsets (one per month).
-    weather_by_origin_month = {}
-    for origin in origins:
-        weather_by_origin_month[origin] = {
-            month: weather_by_origin[origin][weather_by_origin[origin]["month"] == month].copy()
-            for month in range(1, 13)
-        }
+    # # Split weather data by origin.
+    # weather_by_origin = {origin: df_weather[df_weather["origin"] == origin].copy() for origin in origins}
 
-    # Define a function to merge flight and weather data for a given origin and month.
-    def merge_origin_month(origin, month):
-        # Get flight data for this origin.
-        df_origin = df_origin_dict[origin]
-        # Get weather data for this origin and month.
-        weather_subset = weather_by_origin_month[origin][month][["dt", "wind_speed", "wind_dir", "precip"]]
-        # Merge on the exact time match.
-        merged = pd.merge(
-            df_origin,
-            weather_subset,
-            left_on="time_hour",
-            right_on="dt",
-            how="left"
-        )
-        # Add columns to keep track of origin and month.
-        merged["merge_origin"] = origin
-        merged["merge_month"] = month
-        return merged
+    # # For each origin, split the weather data into dictionaries by month and day.
+    # weather_by_origin_month_day = {}
+    # for origin in origins:
+    #     weather_by_origin_month_day[origin] = {}
+    #     for month in range(1, 13):
+    #         # Filter for the given origin and month.
+    #         df_weather_month = weather_by_origin[origin][weather_by_origin[origin]["month"] == month]
+    #         # Now split by day (for all days 1 to 31; days with no data will be empty)
+    #         weather_by_origin_month_day[origin][month] = {
+    #             day: df_weather_month[df_weather_month["day"] == day].copy()
+    #             for day in range(1, 32)
+    #         }
 
-    # Use a ThreadPoolExecutor to merge in parallel for each origin and month.
-    results = []
-    with ThreadPoolExecutor(max_workers=12) as executor:
-        futures = []
-        for origin in origins:
-            for month in range(1, 13):
-                futures.append(executor.submit(merge_origin_month, origin, month))
-        for future in concurrent.futures.as_completed(futures):
-            results.append(future.result())
+    # # Define a function that merges flight and weather data for a given origin, month, and day.
+    # def merge_origin_month_day(origin, month, day):
+    #     # Get flight data for the origin, filtering by month and day.
+    #     df_origin = df_origin_dict[origin]
+    #     df_origin = df_origin[(df_origin["month"] == month) & (df_origin["day"] == day)]
+    #     if df_origin.empty:
+    #         # No flights for this combination; return an empty DataFrame.
+    #         return pd.DataFrame()
 
-    # Concatenate all the merged chunks.
-    df_merged_weather = pd.concat(results, ignore_index=True)
+    #     # Get weather data for the given origin, month, and day.
+    #     weather_subset = weather_by_origin_month_day[origin][month][day][["dt", "wind_speed", "wind_dir", "precip"]]
+    #     if weather_subset.empty:
+    #         return pd.DataFrame()
 
+    #     # Merge the flight data with the weather data on the exact time match.
+    #     merged = pd.merge(
+    #         df_origin,
+    #         weather_subset,
+    #         left_on="time_hour",
+    #         right_on="dt",
+    #         how="left"
+    #     )
+    #     # Add columns to record the origin, month, and day for the merge.
+    #     merged["merge_origin"] = origin
+    #     merged["merge_month"] = month
+    #     merged["merge_day"] = day
+    #     return merged
+
+    # # Use a ThreadPoolExecutor to merge in parallel.
+    # results = []
+    # # Estimate total tasks: len(origins)*12*31. You might limit max_workers based on your system.
+    # total_tasks = len(origins) * 12 * 31
+    # with ThreadPoolExecutor(max_workers=24) as executor:
+    #     futures = []
+    #     for origin in origins:
+    #         for month in range(1, 13):
+    #             for day in range(1, 32):
+    #                 futures.append(executor.submit(merge_origin_month_day, origin, month, day))
+    #     for future in concurrent.futures.as_completed(futures):
+    #         result = future.result()
+    #         # Append non-empty results only to reduce final concatenation overhead.
+    #         if not result.empty:
+    #             results.append(result)
+
+    # # Concatenate all merged chunks.
+    # df_merged_weather = pd.concat(results, ignore_index=True)
+    
+    query = """
+            SELECT 
+                f.rowid,
+                f.origin,
+                f.dest,
+                f.air_time,
+                f.time_hour,
+                f.bearing,
+                w.wind_speed,
+                w.wind_dir,
+                w.precip
+            FROM flights f
+            JOIN weather w
+            ON f.origin = w.origin
+            AND f.time_hour = w.dt
+            WHERE f.air_time_final IS NOT NULL;
+            """
+    df_merged_weather = pd.read_sql_query(query, conn)
+
+    
     df_merged_weather["inner_product"] = df_merged_weather.apply(
         lambda row: row["wind_speed"] * np.cos(np.radians(row["bearing"] - row["wind_dir"])), axis=1
     )
@@ -1178,24 +1220,52 @@ def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_air
     fig_distance_vs_arr_delay = px.scatter(
         df_flights,
         x="geodesic_distance",
-        y="dep_delay_final",
+        y="arr_delay_final",
         title="Flight Distance vs. Arrival Delay",
         labels={"geodesic_distance": "Geodesic Distance (km)", "arr_delay_final": "Arrival Delay (min)"},
         opacity=0.6,
     )
     
-    # Prepare a merged dataframe for plane-type analysis:
-    df_plane_graph = pd.merge(df_flights, df_planes[["tailnum", "type"]], on="tailnum", how="left")
-   # Ensure dt is a datetime column and unique
-    df_weather["dt"] = ensure_datetime(df_weather["time_hour"])
-    df_weather_unique = df_weather.drop_duplicates(subset=["dt"]).set_index("dt")[["wind_speed", "precip"]]
+    # # Prepare a merged dataframe for plane-type analysis:
+    # df_plane_graph = pd.merge(df_flights, df_planes, on="tailnum", how="left")
+    # # Ensure dt is a datetime column and unique
+    # df_weather["time_hour"] = ensure_datetime(df_weather["dt"])
+    # df_weather_unique = df_weather
 
-    # Ensure flight time_hour is also datetime
-    df_plane_graph["time_hour"] = ensure_datetime(df_plane_graph["time_hour"])
+    # # Ensure flight time_hour is also datetime
+    # df_plane_graph["time_hour"] = ensure_datetime(df_plane_graph["time_hour"])
 
-    # Join on the time_hour column (which is not the index) with the weather index
-    df_plane_graph = df_plane_graph.join(df_weather_unique, on="time_hour", how="left")
-    # Compute flight speed (km/h) from geodesic_distance and air_time_final (in minutes)
+    # # Join on the time_hour column (which is not the index) with the weather index
+    # #df_plane_graph = df_plane_graph.join(df_weather_unique, on="time_hour", how="left")
+    # df_plane_graph = pd.merge(df_plane_graph,df_weather_unique, on="time_hour", how="left")
+    # # Compute flight speed (km/h) from geodesic_distance and air_time_final (in minutes)
+    
+    plane_graph_query = """
+                    SELECT 
+                        f.rowid,
+                        f.origin,
+                        f.dest,
+                        f.air_time,
+                        f.air_time_final,
+                        f.time_hour,
+                        f.bearing,
+                        f.geodesic_distance,
+                        f.dep_delay_final,
+                        p.*,
+                        w.wind_speed,
+                        w.wind_dir,
+                        w.precip,
+                        -- Compute flight speed (km/h) as: distance (km) * 60 / air_time (min)
+                        (f.geodesic_distance * 60.0 / f.air_time_final) AS flight_speed
+                    FROM flights f
+                    LEFT JOIN planes p 
+                        ON f.tailnum = p.tailnum
+                    LEFT JOIN weather w 
+                        ON f.time_hour = w.dt
+                    WHERE f.air_time_final IS NOT NULL;
+                    """
+    df_plane_graph = pd.read_sql_query(plane_graph_query, conn)
+    
     df_plane_graph["flight_speed"] = df_plane_graph.apply(
         lambda row: row["geodesic_distance"] * 60 / row["air_time_final"] if row["air_time_final"] > 0 else None, axis=1
     )
@@ -1221,7 +1291,7 @@ def create_visualizations(df_airports, df_flights, df_planes, df_weather, df_air
         fig_precip_vs_delay = px.scatter(
             subset,
             x="precip",
-            y="arr_delay_final",
+            y="dep_delay_final",
             title=f"Precipitation vs. Departure Delay for {pt}",
             labels={"precip": "Precipitation (mm)", "dep_delay_final": "Departure Delay (min)"},
             opacity=0.6,
