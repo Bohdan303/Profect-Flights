@@ -1,4 +1,5 @@
 **Airports Analysis and Visualization**
+
 This repository contains tools to analyze and visualize airport data. It provides insights into airport locations, flight distances, delays, weather impacts and scheduling trends. The project uses Python,Pandas, Plotly, and Streamlit for data analysis and visualizations.
 
 **Installation**
@@ -11,12 +12,14 @@ Make sure input file (if different) is with the same structure as the provided f
 This repository contains code to load, process, and visualize airport data. The project performs the following tasks:
 
 **Data Loading & Cleaning:**
+
 Loads airport and flight data from databases.
 Cleans missing values and updates timezone information using TimezoneFinder and pytz.
 
 Computes Haversine distances and flight bearings.
 
 **Calculations:**
+
 *1. Flight Time Computation & Analysis*
 Converts scheduled and actual departure times to UTC.
 
