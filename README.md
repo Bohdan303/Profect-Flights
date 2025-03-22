@@ -50,7 +50,7 @@ Analyze delays, flight speeds, and manufacturer-specific trends.
 
 Explore geographical flight patterns using interactive maps.
 
-Visualizations:
+*Visualizations:*
 
 Several visualization types are provided:
 
@@ -60,7 +60,9 @@ Several visualization types are provided:
 -Pie Charts: Time zone distribution with percentage labels.
 -Weather Analysis Charts: Evaluating flight performance under different weather conditions.
 
-Usage: To run the Streamlit dashboard:
+*Usage:*
+
+To run the Streamlit dashboard:
 
 ```bash
 streamlit run dashboard.py
