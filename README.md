@@ -1,35 +1,66 @@
 # Airports Analysis and Visualization  
 
-This repository contains code to analyze and visualize airport data. It provides insights into airport locations, flight distances, delays, and weather impacts using Python and Dash for interactive visualizations.
+This repository contains tools to analyze and visualize airport data. It provides insights into airport locations, flight distances, delays, weather impacts and scheduling trends. The project uses Python,Pandas, Plotly, and Streamlit for data analysis and visualizations.
 
 ## Installation  
 To use this repository, install the required dependencies using pip:  
 ```bash
-pip install pandas numpy pytz timezonefinder dash dash-bootstrap-components plotly
+pip install pandas numpy pytz timezonefinder plotly streamlit sqlite3 requests reverse_geocoder pycountry pycountry_convert
 ```
 Make sure input file (if different) is a csv with the same structure as the provided airports.csv.
 
 This repository contains code to load, process, and visualize airport data. The project performs the following tasks:
 
 - **Data Loading & Cleaning:**  
-  Loads an airports.csv file, renames columns, and updates missing timezone information using TimezoneFinder and pytz.
+ Loads airport and flight data from CSV databases.
+
+Cleans missing values and updates timezone information using TimezoneFinder and pytz.
+
+Computes Haversine distances and flight bearings.
 
 - **Calculations:**  
-  Contains functions that:
-  - Compute Euclidean distance from JFK
-  - Compute Geodesic (Haversine) distance from JFK (and verifies this with the flights database)
-  - Compute estimated flight time (using average flight speed)
-  - KMeans clustering for airport proximity
-  - Look up, store and use data to produce flights statistics for NYC airports
-  - Produce statistics for flights from and to given airports
-  - Produce statistics for flight delays
-  - Find manufacturers with the most arrivals at a given airport
-  - Compute flight speeds
-  - Produce statistics on and look for relation concerning weather
+*1. Flight Time Computation & Analysis*
+Converts scheduled and actual departure times to UTC.
+
+Identifies flight delays and calculates air time.
+
+Adjusts for overnight flights and timezone differences.
+
+*2. Weather Data Integration*
+Fetches and processes historical weather data.
+
+Merges weather data with airport and flight records.
+
+Analyzes how weather conditions impact flight schedules and delays.
+
+*3. Parallel Processing for Performance*
+Uses ThreadPoolExecutor and ProcessPoolExecutor to speed up computations.
+
+Efficiently processes large datasets in parallel for faster insights.
+
+*4. Interactive Dashboard (Streamlit)*
+View real-time visualizations of flight statistics and weather impacts.
+
+Analyze delays, flight speeds, and manufacturer-specific trends.
+
+Explore geographical flight patterns using interactive maps.
+
 
 - **Visualizations:**  
   Several visualization types are provided:
-  - *Scatter Plots:* Location maps (world and US), altitude-based scatter plots, and heatmaps.
-  - *Route Plotting:* Plot flight routes from JFK to selected airports.
-  - *Bar Charts & Histograms:* Distribution of time zones, distances, and flight times.
+  - *Scatter Plots:* 
+  Location maps (world and US), altitude-based scatter plots, and heatmaps.
+  - *Route Plotting:* Visualizing flight paths from JFK and other airports.
+  - *Bar Charts & Histograms:* Analyzing flight delays, time zone distributions, and speeds.
   - *Pie Charts:* Time zone distribution with percentage labels.
+  - *Weather Analysis Charts:* Evaluating flight performance under different weather conditions.
+
+  **Usage:**
+  To run the Streamlit dashboard:
+
+```bash
+streamlit run dashboard.py
+```
+
+This will launch an interactive web interface where users can explore flight statistics.
+
