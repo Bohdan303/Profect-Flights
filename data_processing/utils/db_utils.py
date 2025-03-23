@@ -1,15 +1,8 @@
 import os
 import sqlite3
 import pandas as pd
-import zipfile
-
-zip_file = "flights_database.zip"
-extract_to = "flights_database"
-
-with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-    zip_ref.extractall(extract_to)
    
-def load_data(db_path="flights_database\flights_database.db"):
+def load_data(db_path="flights_database.db"):
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode = MEMORY")
     conn.execute("PRAGMA synchronous = OFF")
