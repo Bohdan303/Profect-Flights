@@ -16,7 +16,6 @@ def load_preprocessed_data(preprocessed_db):
     df_airlines = pd.read_sql_query("SELECT * FROM airlines", conn)
     return df_airports, df_flights, df_planes, df_weather, df_airlines
 
-    
 if __name__ == "__main__":
     conn, df_airports, df_flights, df_planes, df_weather, df_airlines = load_data()
     preprocessed_db = "preprocessed_flights.db"
