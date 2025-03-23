@@ -2,7 +2,7 @@ import os
 import sqlite3
 import pandas as pd
    
-def load_data(db_path="flights_database\flights_database.db"):
+def load_data(db_path="flights_database.db"):
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode = MEMORY")
     conn.execute("PRAGMA synchronous = OFF")
