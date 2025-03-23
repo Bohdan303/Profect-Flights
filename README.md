@@ -71,7 +71,7 @@ streamlit run "main.py"
 This will launch an interactive web interface where users can explore flight statistics.
 
 *Directory Structure* 
-
+```bash
 flight_dashboard/
 ├── data_processing/
 │   ├── __init__.py
@@ -127,3 +127,4 @@ flight_dashboard/
 ├── main.py
 ├── requirements.txt
 └── README.md
+```
