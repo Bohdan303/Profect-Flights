@@ -8,6 +8,5 @@ reverse_geocoder
 pycountry
 pycountry_convert
 requests
-time
 datetime
 sqlite3
