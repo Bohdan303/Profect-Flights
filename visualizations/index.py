@@ -1,34 +1,39 @@
+# visualizations/index.py
 import pandas as pd
-import sqlite3
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 
-def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df_airlines, preprocessed_db):
-    conn = sqlite3.connect(preprocessed_db)
-    # Existing visualizations
+def create_all_visualizations(conn):
+    visuals = {}
+
+    # --- World Airports Map ---
+    query_airports = "SELECT faa, name, lat, lon, alt, tzone FROM airports"
+    df_airports = pd.read_sql_query(query_airports, conn)
     fig_world = px.scatter_geo(
         df_airports,
         lat="lat",
         lon="lon",
         hover_name="name",
-        title="Airport Locations Worldwide",
+        title="Airport Locations Worldwide"
     )
     fig_world.update_traces(customdata=df_airports["faa"])
-    fig_world.update_layout(clickmode="event+select")
-    print("fig_world")
-    
-    df_us_airports = df_airports[df_airports["tzone"].astype(str).str.contains("America", na=False)]
+    visuals["fig_world"] = fig_world
+
+    # --- US Airports Map ---
+    query_us_airports = "SELECT faa, name, lat, lon, tzone FROM airports WHERE tzone LIKE '%America%'"
+    df_us_airports = pd.read_sql_query(query_us_airports, conn)
     fig_us = px.scatter_geo(
         df_us_airports,
         lat="lat",
         lon="lon",
         hover_name="name",
         title="US Airports",
-        scope="usa",
+        scope="usa"
     )
-    
-    print("fig_us")
+    visuals["fig_us"] = fig_us
+
+    # --- Altitude Map ---
     fig_alt = px.scatter_geo(
         df_airports,
         lat="lat",
@@ -36,41 +41,49 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         hover_name="name",
         color="alt",
         title="Airports by Altitude",
-        color_continuous_scale="viridis",
+        color_continuous_scale="viridis"
     )
-    
-    print("fig_alt")
+    visuals["fig_alt"] = fig_alt
+
+    # --- Euclidean Distance Histogram ---
+    query_euc = "SELECT euclidean_distance FROM flights WHERE euclidean_distance IS NOT NULL"
+    df_euc = pd.read_sql_query(query_euc, conn)
     fig_hist_euc = px.histogram(
-        df_flights,
+        df_euc,
         x="euclidean_distance",
         nbins=50,
-        title="Euclidean Distance Distribution (Flight Data)",
+        title="Euclidean Distance Distribution (Flight Data)"
     )
+    visuals["fig_hist_euc"] = fig_hist_euc
+
+    # --- Geodesic Distance Histogram ---
+    query_geo = "SELECT geodesic_distance FROM flights WHERE geodesic_distance IS NOT NULL"
+    df_geo = pd.read_sql_query(query_geo, conn)
     fig_hist_geo = px.histogram(
-        df_flights,
+        df_geo,
         x="geodesic_distance",
         nbins=50,
-        title="Geodesic Distance Distribution (Flight Data)",
+        title="Geodesic Distance Distribution (Flight Data)"
     )
-    
-    print("fig_hist_geo")
-    df_flight_distance = (
-        df_flights.groupby("dest")["geodesic_distance"]
-        .mean()
-        .reset_index(name="avg_geodesic_distance")
+    visuals["fig_hist_geo"] = fig_hist_geo
+
+    # --- Computed vs. DB Flight Distances ---
+    query_compare = """
+    WITH computed_geodesic AS (
+      SELECT dest, AVG(geodesic_distance) AS avg_geodesic_distance
+      FROM flights
+      GROUP BY dest
+    ),
+    db_distance AS (
+      SELECT dest, AVG(distance) AS avg_flight_distance
+      FROM flights
+      GROUP BY dest
     )
-    print("df_flight_distance")
-    df_db_distance = pd.read_sql_query(
-        """
-        SELECT dest, AVG(distance) AS avg_flight_distance
-        FROM flights
-        GROUP BY dest;
-        """,
-        conn,
-    )
-    print("df_db_distance")
-    df_compare = pd.merge(df_flight_distance, df_db_distance, on="dest", how="left")
-    print("df_compare")
+    SELECT c.dest, c.avg_geodesic_distance, d.avg_flight_distance
+    FROM computed_geodesic c
+    LEFT JOIN db_distance d ON c.dest = d.dest;
+    """
+    df_compare = pd.read_sql_query(query_compare, conn)
     fig_compare = px.scatter(
         df_compare,
         x="avg_geodesic_distance",
@@ -79,195 +92,132 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         opacity=0.6,
         labels={
             "avg_geodesic_distance": "Avg Computed Geodesic Distance (km)",
-            "avg_flight_distance": "Avg Flight Distance (km)",
-        },
+            "avg_flight_distance": "Avg Flight Distance (km)"
+        }
     )
-    
-    print("fig_compare")
-    dep_dt = pd.to_datetime(df_flights["dep_dt"], utc=True)
-    print("dep_dt")
-    arr_dt = pd.to_datetime(df_flights["arr_dt"], utc=True)
-    print("arr_dt")
-    df_flights["computed_duration"] = (arr_dt - dep_dt).dt.total_seconds() / 60
-    print("df_flights, computed_duration")
+    visuals["fig_compare"] = fig_compare
+
+    # --- Flight Duration vs. Recorded Air Time ---
+    query_duration = """
+    SELECT rowid,
+           CAST((julianday(arr_dt) - julianday(dep_dt)) * 24 * 60 AS REAL) AS computed_duration,
+           air_time
+    FROM flights
+    WHERE dep_dt IS NOT NULL AND arr_dt IS NOT NULL
+    """
+    df_duration = pd.read_sql_query(query_duration, conn)
     fig_duration = px.scatter(
-        df_flights,
+        df_duration,
         x="computed_duration",
         y="air_time",
         title="Computed Flight Duration vs. Recorded Air Time",
-        labels={
-            "computed_duration": "Computed Duration (min)",
-            "air_time": "Air Time (min)",
-        },
+        labels={"computed_duration": "Computed Duration (min)", "air_time": "Air Time (min)"}
     )
-    print("fig_duration")
-    
-    query = """
-            SELECT 
-                f.rowid,
-                f.origin,
-                f.dest,
-                f.air_time,
-                f.time_hour,
-                f.bearing,
-                w.wind_speed,
-                w.wind_dir,
-                w.precip
-            FROM flights f
-            JOIN weather w
-            ON f.origin = w.origin
-            AND f.time_hour = w.dt
-            WHERE f.air_time_final IS NOT NULL;
-            """
-    df_merged_weather = pd.read_sql_query(query, conn)
-    print("df_merged_weather")
+    visuals["fig_duration"] = fig_duration
 
-    
-    df_merged_weather["inner_product"] = df_merged_weather.apply(
-        lambda row: row["wind_speed"] * np.cos(np.radians(row["bearing"] - row["wind_dir"])), axis=1
-    )
-    print("df_merged_weather, innerporduct")
-    fig_inner_product = px.scatter(
-        df_merged_weather,
+    # --- Inner Product vs. Air Time ---
+    # (Because SQLite lacks trig functions, we fetch needed columns and compute in Python)
+    query_inner = """
+    SELECT f.rowid, f.air_time, f.bearing, w.wind_speed, w.wind_dir
+    FROM flights f
+    JOIN weather w ON f.origin = w.origin AND f.time_hour = w.dt
+    WHERE f.air_time_final IS NOT NULL
+    """
+    df_inner = pd.read_sql_query(query_inner, conn)
+    df_inner["inner_product"] = df_inner["wind_speed"] * np.cos(np.deg2rad(df_inner["bearing"] - df_inner["wind_dir"]))
+    fig_inner = px.scatter(
+        df_inner,
         x="inner_product",
         y="air_time",
         title="Inner Product vs. Air Time",
         opacity=0.5,
-        labels={
-            "inner_product": "Inner Product (Flight Dir · Wind Vec)",
-            "air_time": "Air Time (min)",
-        },
+        labels={"inner_product": "Inner Product (Flight Dir · Wind Vec)", "air_time": "Air Time (min)"}
     )
-    print("fig_inner_product")
-    corr_val = df_merged_weather["inner_product"].corr(df_merged_weather["air_time"])
-    
-    print("corr_val")
-    if "dep_delay" in df_flights.columns and "carrier" in df_flights.columns:
-        df_airline_delay = pd.merge(df_flights, df_airlines, on="carrier", how="left")
-        print("df_airline_delay")
-        group_delay = (
-            df_airline_delay.groupby("name")["dep_delay"]
-            .mean()
-            .reset_index()
-            .sort_values("dep_delay", ascending=False)
-        )
-        print("group_delay")
-        fig_airline_delay = px.bar(
-            group_delay,
-            x="name",
-            y="dep_delay",
-            title="Average Departure Delay per Airline",
-            labels={"dep_delay": "Avg Dep Delay (min)", "name": "Airline"},
-        )
-        print("fig_airline_delay")
-    else:
-        fig_airline_delay = go.Figure()
-        
+    visuals["fig_inner_product"] = fig_inner
+
+    # --- Average Departure Delay per Airline ---
+    query_airline_delay = """
+    SELECT a.name, AVG(f.dep_delay) AS avg_dep_delay
+    FROM flights f
+    JOIN airlines a ON f.carrier = a.carrier
+    GROUP BY a.name
+    """
+    df_airline_delay = pd.read_sql_query(query_airline_delay, conn)
+    fig_airline_delay = px.bar(
+        df_airline_delay,
+        x="name",
+        y="avg_dep_delay",
+        title="Average Departure Delay per Airline",
+        labels={"avg_dep_delay": "Avg Dep Delay (min)", "name": "Airline"}
+    )
+    visuals["fig_airline_delay"] = fig_airline_delay
+
+    # --- Flight Distance vs. Arrival Delay ---
+    query_delay_distance = "SELECT geodesic_distance, arr_delay_final FROM flights WHERE geodesic_distance IS NOT NULL AND arr_delay_final IS NOT NULL"
+    df_delay_distance = pd.read_sql_query(query_delay_distance, conn)
     fig_distance_vs_arr_delay = px.scatter(
-        df_flights,
+        df_delay_distance,
         x="geodesic_distance",
         y="arr_delay_final",
         title="Flight Distance vs. Arrival Delay",
         labels={"geodesic_distance": "Geodesic Distance (km)", "arr_delay_final": "Arrival Delay (min)"},
-        opacity=0.6,
+        opacity=0.6
     )
-    print("fig_distance_vs_arr_delay")
-    
-    plane_graph_query = """
-                    SELECT 
-                        f.rowid,
-                        f.origin,
-                        f.dest,
-                        f.air_time,
-                        f.air_time_final,
-                        f.time_hour,
-                        f.bearing,
-                        f.geodesic_distance,
-                        f.dep_delay_final,
-                        p.*,
-                        w.wind_speed,
-                        w.wind_dir,
-                        w.precip,
-                        -- Compute flight speed (km/h) as: distance (km) * 60 / air_time (min)
-                        (f.geodesic_distance * 60.0 / f.air_time_final) AS flight_speed
-                    FROM flights f
-                    LEFT JOIN planes p 
-                        ON f.tailnum = p.tailnum
-                    LEFT JOIN weather w 
-                        ON f.time_hour = w.dt
-                    WHERE f.air_time_final IS NOT NULL;
-                    """
-    df_plane_graph = pd.read_sql_query(plane_graph_query, conn)
-    
-    print("df_plane_graph")
-    df_plane_graph["flight_speed"] = df_plane_graph.apply(
-        lambda row: row["geodesic_distance"] * 60 / row["air_time_final"] if row["air_time_final"] > 0 else None, axis=1
-    )
-    
-    print("df_plane_graph, flight speed")
-    plane_types = sorted(df_plane_graph["type"].dropna().unique())
+    visuals["fig_distance_vs_arr_delay"] = fig_distance_vs_arr_delay
+
+    # --- Plane Type Analysis (by joining flights, planes, weather) ---
+    query_plane = """
+    SELECT f.rowid, f.origin, f.dest, f.air_time, f.air_time_final, f.time_hour, f.bearing,
+           f.geodesic_distance, f.dep_delay_final, p.type, w.wind_speed, w.wind_dir, w.precip,
+           (f.geodesic_distance * 60.0 / f.air_time_final) AS flight_speed
+    FROM flights f
+    LEFT JOIN planes p ON f.tailnum = p.tailnum
+    LEFT JOIN weather w ON f.time_hour = w.dt
+    WHERE f.air_time_final IS NOT NULL
+    """
+    df_plane = pd.read_sql_query(query_plane, conn)
     wind_vs_delay_by_type = {}
     precip_vs_delay_by_type = {}
     delay_airport_speed_by_type = {}
-    
-    for pt in plane_types:
-        subset = df_plane_graph[df_plane_graph["type"] == pt]
-        
-        print("subset {pt}")
-        fig_wind_vs_delay = px.scatter(
+
+    for pt in sorted(df_plane["type"].dropna().unique()):
+        subset = df_plane[df_plane["type"] == pt]
+        fig_wind = px.scatter(
             subset,
             x="wind_speed",
             y="dep_delay_final",
-            title=f"Wind Speed vs. Departure Delay for {pt}",
+            title=f"Wind Speed vs. Departure Delay ({pt})",
             labels={"wind_speed": "Wind Speed (km/h)", "dep_delay_final": "Departure Delay (min)"},
-            opacity=0.6,
+            opacity=0.6
         )
-        
-        print("fig_wind_vs_delay {pt}")
-        fig_precip_vs_delay = px.scatter(
+        wind_vs_delay_by_type[pt] = fig_wind
+
+        fig_precip = px.scatter(
             subset,
             x="precip",
             y="dep_delay_final",
-            title=f"Precipitation vs. Departure Delay for {pt}",
+            title=f"Precipitation vs. Departure Delay ({pt})",
             labels={"precip": "Precipitation (mm)", "dep_delay_final": "Departure Delay (min)"},
-            opacity=0.6,
+            opacity=0.6
         )
-        
-        print("fig_precip_vs_delay {pt}")
-        group = subset.groupby("origin").agg(avg_delay=("dep_delay_final", "mean"),
-                                            avg_speed=("flight_speed", "mean")).reset_index()
-        print("group origin, dep_delay final , flightspeed {pt} ")
-        fig_delay_airport_speed = px.scatter(
-            group,
+        precip_vs_delay_by_type[pt] = fig_precip
+
+        df_group = subset.groupby("origin").agg(
+            avg_delay=("dep_delay_final", "mean"),
+            avg_speed=("flight_speed", "mean")
+        ).reset_index()
+        fig_delay_airport = px.scatter(
+            df_group,
             x="origin",
             y="avg_delay",
             size="avg_speed",
-            title=f"Avg Departure Delay by Airport & Avg Flight Speed for {pt}",
-            labels={"origin": "Origin Airport", "avg_delay": "Avg Departure Delay (min)", "avg_speed": "Avg Flight Speed (km/h)"},
+            title=f"Avg Dep Delay & Flight Speed by Airport ({pt})",
+            labels={"origin": "Origin Airport", "avg_delay": "Avg Departure Delay (min)", "avg_speed": "Avg Flight Speed (km/h)"}
         )
-        print("fig_delay_airport_speed")
-        wind_vs_delay_by_type[pt] = fig_wind_vs_delay
-        precip_vs_delay_by_type[pt] = fig_precip_vs_delay
-        delay_airport_speed_by_type[pt] = fig_delay_airport_speed
-        print("save {pt} ")
+        delay_airport_speed_by_type[pt] = fig_delay_airport
 
-    # --------------------------------------------------------------------------
-    # Assemble all visualizations in a dictionary
-    visuals = {
-        "fig_world": fig_world,
-        "fig_us": fig_us,
-        "fig_alt": fig_alt,
-        "fig_hist_euc": fig_hist_euc,
-        "fig_hist_geo": fig_hist_geo,
-        "fig_compare": fig_compare,
-        "fig_duration": fig_duration,
-        "fig_airline_delay": fig_airline_delay,
-        "fig_inner_product": fig_inner_product,
-        "corr_val": corr_val,
-        # New graphs:
-        "fig_distance_vs_arr_delay": fig_distance_vs_arr_delay,
-        "wind_vs_delay_by_type": wind_vs_delay_by_type,
-        "precip_vs_delay_by_type": precip_vs_delay_by_type,
-        "delay_airport_speed_by_type": delay_airport_speed_by_type,
-    }
+    visuals["wind_vs_delay_by_type"] = wind_vs_delay_by_type
+    visuals["precip_vs_delay_by_type"] = precip_vs_delay_by_type
+    visuals["delay_airport_speed_by_type"] = delay_airport_speed_by_type
+
     return visuals
