@@ -124,6 +124,9 @@ flight_dashboard/
 │   │   └── plane_type_analysis.py
 │   └── app.py
 │
+│──.gitattributes
+│── flight_database.db
+│── preprocessed_flights.db
 ├── main.py
 ├── requirements.txt
 └── README.md
