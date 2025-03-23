@@ -16,6 +16,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
     )
     fig_world.update_traces(customdata=df_airports["faa"])
     fig_world.update_layout(clickmode="event+select")
+    print("fig_world")
     
     df_us_airports = df_airports[df_airports["tzone"].astype(str).str.contains("America", na=False)]
     fig_us = px.scatter_geo(
@@ -27,6 +28,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         scope="usa",
     )
     
+    print("fig_us")
     fig_alt = px.scatter_geo(
         df_airports,
         lat="lat",
@@ -37,6 +39,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         color_continuous_scale="viridis",
     )
     
+    print("fig_alt")
     fig_hist_euc = px.histogram(
         df_flights,
         x="euclidean_distance",
@@ -50,11 +53,13 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         title="Geodesic Distance Distribution (Flight Data)",
     )
     
+    print("fig_hist_geo")
     df_flight_distance = (
         df_flights.groupby("dest")["geodesic_distance"]
         .mean()
         .reset_index(name="avg_geodesic_distance")
     )
+    print("df_flight_distance")
     df_db_distance = pd.read_sql_query(
         """
         SELECT dest, AVG(distance) AS avg_flight_distance
@@ -63,7 +68,9 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         """,
         conn,
     )
+    print("df_db_distance")
     df_compare = pd.merge(df_flight_distance, df_db_distance, on="dest", how="left")
+    print("df_compare")
     fig_compare = px.scatter(
         df_compare,
         x="avg_geodesic_distance",
@@ -76,9 +83,13 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         },
     )
     
+    print("fig_compare")
     dep_dt = pd.to_datetime(df_flights["dep_dt"], utc=True)
+    print("dep_dt")
     arr_dt = pd.to_datetime(df_flights["arr_dt"], utc=True)
+    print("arr_dt")
     df_flights["computed_duration"] = (arr_dt - dep_dt).dt.total_seconds() / 60
+    print("df_flights, computed_duration")
     fig_duration = px.scatter(
         df_flights,
         x="computed_duration",
@@ -89,6 +100,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             "air_time": "Air Time (min)",
         },
     )
+    print("fig_duration")
     
     query = """
             SELECT 
@@ -108,11 +120,13 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             WHERE f.air_time_final IS NOT NULL;
             """
     df_merged_weather = pd.read_sql_query(query, conn)
+    print("df_merged_weather")
 
     
     df_merged_weather["inner_product"] = df_merged_weather.apply(
         lambda row: row["wind_speed"] * np.cos(np.radians(row["bearing"] - row["wind_dir"])), axis=1
     )
+    print("df_merged_weather, innerporduct")
     fig_inner_product = px.scatter(
         df_merged_weather,
         x="inner_product",
@@ -124,16 +138,20 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             "air_time": "Air Time (min)",
         },
     )
+    print("fig_inner_product")
     corr_val = df_merged_weather["inner_product"].corr(df_merged_weather["air_time"])
     
+    print("corr_val")
     if "dep_delay" in df_flights.columns and "carrier" in df_flights.columns:
         df_airline_delay = pd.merge(df_flights, df_airlines, on="carrier", how="left")
+        print("df_airline_delay")
         group_delay = (
             df_airline_delay.groupby("name")["dep_delay"]
             .mean()
             .reset_index()
             .sort_values("dep_delay", ascending=False)
         )
+        print("group_delay")
         fig_airline_delay = px.bar(
             group_delay,
             x="name",
@@ -141,6 +159,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             title="Average Departure Delay per Airline",
             labels={"dep_delay": "Avg Dep Delay (min)", "name": "Airline"},
         )
+        print("fig_airline_delay")
     else:
         fig_airline_delay = go.Figure()
         
@@ -152,6 +171,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
         labels={"geodesic_distance": "Geodesic Distance (km)", "arr_delay_final": "Arrival Delay (min)"},
         opacity=0.6,
     )
+    print("fig_distance_vs_arr_delay")
     
     plane_graph_query = """
                     SELECT 
@@ -179,10 +199,12 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
                     """
     df_plane_graph = pd.read_sql_query(plane_graph_query, conn)
     
+    print("df_plane_graph")
     df_plane_graph["flight_speed"] = df_plane_graph.apply(
         lambda row: row["geodesic_distance"] * 60 / row["air_time_final"] if row["air_time_final"] > 0 else None, axis=1
     )
     
+    print("df_plane_graph, flight speed")
     plane_types = sorted(df_plane_graph["type"].dropna().unique())
     wind_vs_delay_by_type = {}
     precip_vs_delay_by_type = {}
@@ -191,6 +213,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
     for pt in plane_types:
         subset = df_plane_graph[df_plane_graph["type"] == pt]
         
+        print("subset {pt}")
         fig_wind_vs_delay = px.scatter(
             subset,
             x="wind_speed",
@@ -200,6 +223,7 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             opacity=0.6,
         )
         
+        print("fig_wind_vs_delay {pt}")
         fig_precip_vs_delay = px.scatter(
             subset,
             x="precip",
@@ -209,8 +233,10 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             opacity=0.6,
         )
         
+        print("fig_precip_vs_delay {pt}")
         group = subset.groupby("origin").agg(avg_delay=("dep_delay_final", "mean"),
                                             avg_speed=("flight_speed", "mean")).reset_index()
+        print("group origin, dep_delay final , flightspeed {pt} ")
         fig_delay_airport_speed = px.scatter(
             group,
             x="origin",
@@ -219,9 +245,11 @@ def create_all_visualizations(df_airports, df_flights, df_planes, df_weather, df
             title=f"Avg Departure Delay by Airport & Avg Flight Speed for {pt}",
             labels={"origin": "Origin Airport", "avg_delay": "Avg Departure Delay (min)", "avg_speed": "Avg Flight Speed (km/h)"},
         )
+        print("fig_delay_airport_speed")
         wind_vs_delay_by_type[pt] = fig_wind_vs_delay
         precip_vs_delay_by_type[pt] = fig_precip_vs_delay
         delay_airport_speed_by_type[pt] = fig_delay_airport_speed
+        print("save {pt} ")
 
     # --------------------------------------------------------------------------
     # Assemble all visualizations in a dictionary
