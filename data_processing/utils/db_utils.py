@@ -9,7 +9,6 @@ def load_data(db_path="flights_database.db"):
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute("PRAGMA cache_size = 100000")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_flights_dest ON flights(dest)")
-    # (Add additional index creation statements as needed)
     conn.commit()
     
     df_airports = pd.read_sql_query("SELECT * FROM airports", conn)
