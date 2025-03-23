@@ -12,4 +12,4 @@ def render(df_airports, df_flights, visuals):
                     labels={"tz": "Time Zone", "avg_dep_delay": "Avg Departure Delay (min)"})
     st.plotly_chart(fig_tz)
     # Show world map from visualizations
-    st.plotly_chart(visuals.get("fig_world"))
+    st.plotly_chart(visuals.get("fig_alt"))

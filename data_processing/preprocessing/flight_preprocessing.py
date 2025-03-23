@@ -1,7 +1,16 @@
 import pandas as pd
 from data_processing.utils.time_utils import ensure_datetime
 from data_processing.preprocessing.departure_arrival import process_all_time_fields_vectorized
-from data_processing.preprocessing.schedule_processing import compute_sched_datetimes
+
+def compute_local_arrival(df, df_airports):
+    """Computes local arrival time using timezone offsets from the airports table.
+    Here, we use the processed actual arrival datetime (arr_dt) and add the airport's offset.
+    """
+    tz_mapping = df_airports.set_index("faa")["tz"].to_dict()
+    df["dest_offset"] = df["dest"].map(tz_mapping).fillna(0)
+    df["local_arrival"] = df["arr_dt"] + pd.to_timedelta(df["dest_offset"], unit="h")
+    df.drop(columns=["dest_offset"], inplace=True)
+    return df
 
 def change_sched_time_to_datetime(df):
     df["time_hour"] = df["time_hour"].apply(lambda x: x if isinstance(x, (pd.Timestamp,)) 
@@ -63,4 +72,5 @@ def preprocess_flights(df, df_airports):
     df = process_all_time_fields_vectorized(df, tol_percent=10)
     df = change_sched_time_to_datetime(df)
     df = compute_flight_distances(df, df_airports)
+    df = compute_local_arrival(df, df_airports)
     return df

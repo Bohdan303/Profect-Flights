@@ -1,5 +1,4 @@
 import pandas as pd
-from data_processing.utils.time_utils import ensure_datetime
 
 def vectorized_ensure_datetime(series):
     """Converts a Series of time values to UTC-aware datetimes."""
