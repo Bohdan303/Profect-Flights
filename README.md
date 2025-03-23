@@ -6,7 +6,7 @@ This repository contains tools to analyze and visualize airport data. It provide
 
 To use this repository, install the required dependencies using pip:
 ```bash
-pip install pandas numpy plotly streamlit pytz timezonefinder reverse_geocoder pycountry pycountry_convert requests threading concurrent math time datetime sqlite3
+pip install pandas numpy plotly streamlit pytz timezonefinder reverse_geocoder pycountry pycountry_convert requests threading concurrent math time datetime sqlite3 zipfile
 ```
 Make sure input file (if different) is with the same structure as the provided flights_database.zip.
 
