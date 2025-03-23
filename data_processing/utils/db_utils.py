@@ -1,15 +1,18 @@
 import os
+import zipfile
 import sqlite3
 import pandas as pd
-import zipfile
 
-zip_file = "flights_database.zip"
-extract_to = "flights_database"
-
-with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-    zip_ref.extractall(extract_to)
-   
-def load_data(db_path="flights_database\flights_database.db"):
+def unzip_database(zip_file_path, extract_dir):
+    # Create the extraction directory if it doesn't exist
+    if not os.path.exists(extract_dir):
+        os.makedirs(extract_dir)
+    # Extract all files from the zip archive
+    with zipfile.ZipFile(zip_file_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_dir)
+    print("Files extracted to", extract_dir)
+    
+def load_data(db_path="flights_database.db"):
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA journal_mode = MEMORY")
     conn.execute("PRAGMA synchronous = OFF")
@@ -32,6 +35,22 @@ def save_preprocessed_data(df_airports, df_flights, df_planes, df_weather, df_ai
     df_planes.to_sql("planes", new_conn, if_exists="replace", index=False)
     df_weather.to_sql("weather", new_conn, if_exists="replace", index=False)
     df_airlines.to_sql("airlines", new_conn, if_exists="replace", index=False)
+    new_conn.commit()
+    new_conn.close()
+    print("Preprocessed data saved to", output_db)
+
+# Example usage:
+zip_file_path = "flights_database.zip"   # Your zip file path
+extract_dir = "extracted_db"              # Directory where files will be extracted
+
+# Unzip the file
+unzip_database(zip_file_path, extract_dir)
+
+# Build the database path (adjust the file name if necessary)
+db_path = os.path.join(extract_dir, "flights_database.db")
+
+# Load data from the unzipped database
+conn, df_airports, df_flights, df_planes, df_weather, df_airlines = load_data(db_path)
     new_conn.commit()
     new_conn.close()
     print("Preprocessed data saved to", output_db)
