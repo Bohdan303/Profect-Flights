@@ -21,7 +21,7 @@ def create_all_visualizations(conn):
     visuals["fig_world"] = fig_world
 
     # --- US Airports Map ---
-    query_us_airports = "SELECT faa, name, lat, lon, tzone FROM airports WHERE tzone LIKE '%America%'"
+    query_us_airports = "SELECT faa, name, lat, lon, alt, tzone FROM airports WHERE tzone LIKE '%America%'"
     df_us_airports = pd.read_sql_query(query_us_airports, conn)
     fig_us = px.scatter_geo(
         df_us_airports,
@@ -33,7 +33,7 @@ def create_all_visualizations(conn):
     )
     visuals["fig_us"] = fig_us
 
-    # --- Altitude Map ---
+    # --- Altitude World Map ---
     fig_alt = px.scatter_geo(
         df_airports,
         lat="lat",
@@ -44,6 +44,19 @@ def create_all_visualizations(conn):
         color_continuous_scale="viridis"
     )
     visuals["fig_alt"] = fig_alt
+    
+    # --- Altitude US Map ---
+    fig_us_alt = px.scatter_geo(
+        df_us_airports,
+        lat="lat",
+        lon="lon",
+        hover_name="name",
+        title="US Airports by Altitude",
+        scope="usa",
+        color="alt",
+        color_continuous_scale="viridis",
+    )
+    visuals["fig_us_alt"] = fig_us_alt
 
     # --- Euclidean Distance Histogram ---
     query_euc = "SELECT euclidean_distance FROM flights WHERE euclidean_distance IS NOT NULL"
@@ -203,16 +216,18 @@ def create_all_visualizations(conn):
         precip_vs_delay_by_type[pt] = fig_precip
 
         df_group = subset.groupby("origin").agg(
-            avg_delay=("dep_delay_final", "mean"),
-            avg_speed=("flight_speed", "mean")
+        avg_delay=("dep_delay_final", "mean"),
+        avg_speed=("flight_speed", "mean")
         ).reset_index()
-        fig_delay_airport = px.scatter(
+    
+        # Change: Use a bar chart instead of a scatter plot
+        fig_delay_airport = px.bar(
             df_group,
             x="origin",
             y="avg_delay",
-            size="avg_speed",
-            title=f"Avg Dep Delay & Flight Speed by Airport ({pt})",
-            labels={"origin": "Origin Airport", "avg_delay": "Avg Departure Delay (min)", "avg_speed": "Avg Flight Speed (km/h)"}
+            title=f"Avg Dep Delay by Airport ({pt})",
+            labels={"origin": "Origin Airport", "avg_delay": "Avg Departure Delay (min)"},
+            hover_data={"avg_speed": True}  # show average flight speed in the hover data
         )
         delay_airport_speed_by_type[pt] = fig_delay_airport
 
